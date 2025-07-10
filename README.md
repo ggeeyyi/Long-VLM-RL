@@ -2,7 +2,7 @@
 <img src="assets/long-rl-logo.png" alt="Stanford-Alpaca" style="width: 100%; min-width: 300px; display: block; margin: auto;">
 </p>
 
-# Long-RL: Scaling RL Framework to Long Sequences
+# Long-RL: Scaling RL to Long Sequences
 
 [![Huggingface Models](https://img.shields.io/badge/Models-Huggingface%20Models-bron)](https://huggingface.co/xxx)
 [![Paper](https://img.shields.io/badge/Paper-Arvix%20Link-green)](https://arxiv.org/abs/xxx)
@@ -11,7 +11,7 @@
 
 <div align="center">
 
-[![Watch the video](assets/demo_video_first_frame.png)](https://www.youtube.com/watch?v=CvajPddLQ1E)
+[![Watch the video](assets/demo_video_first_frame.png)](https://www.youtube.com/watch?v=nyfEmRfcc5M)
 
 </div>
 
@@ -57,7 +57,7 @@ Support algorithms:
   - `examples/new_supports/qwen2_5_vl_3b_video_grpo.sh`
   - `examples/new_supports/qwen2_5_vl_3b_video_reinforce.sh`
 
-**Scaling up Long Video Reasoning [[Paper](http://arxiv.org/abs/xxx)]** <br />
+**Scaling RL to Long Videos [[Paper](http://arxiv.org/abs/xxx)]** <br />
 [Yukang Chen](https://yukangchen.com/), [Wei Huang](https://aaron-weihuang.com/), [Baifeng Shi](https://bfshi.github.io/), [Qinghao Hu](https://tonyhao.xyz/), [Hanrong Ye](https://sites.google.com/site/yhrspace/home), [Ligeng Zhu](https://lzhu.me/), [Zhijian Liu](https://zhijianliu.com), [Pavlo Molchanov](https://www.pmolchanov.com/), [Jan Kautz](https://jankautz.com), [Xiaojuan Qi](https://xjqi.github.io/), [Sifei Liu](https://sifeiliu.net/),[Hongxu Yin](https://hongxu-yin.github.io/), [Yao Lu](https://scholar.google.com/citations?user=OI7zFmwAAAAJ&hl=en), [Song Han](http://songhan.mit.edu/) <br />
 
 We introduce a full-stack framework that scales up reasoning in vision-language models (VLMs) to long videos, leveraging reinforcement learning.
@@ -157,7 +157,7 @@ Please consider to cite our paper and this framework, if they are helpful in you
 
 ```bibtex
 @misc{long-rl,
-  title = {Long-RL: Scaling RL Framework to Long Sequences},
+  title = {Long-RL: Scaling RL to Long Sequences},
   author = {Yukang Chen, Wei Huang, Shuai Yang, Qinghao Hu, Baifeng Shi, Hanrong Ye, Ligeng Zhu, Zhijian Liu, Pavlo Molchanov, Jan Kautz, Xiaojuan Qi, Sifei Liu,Hongxu Yin, Yao Lu, Song Han},
   year = {2025},
   publisher = {GitHub},
@@ -167,7 +167,7 @@ Please consider to cite our paper and this framework, if they are helpful in you
 ```
 ```bibtex
 @article{chen2025longvila-r1,
-      title={Scaling up Long Video Reasoning},
+      title={Scaling RL to Long Videos},
       author={Yukang Chen and Wei Huang and Baifeng Shi and Qinghao Hu and Hanrong Ye and Ligeng Zhu and Zhijian Liu and Pavlo Molchanov and Jan Kautz and Xiaojuan Qi and Sifei Liu and Hongxu Yin and Yao Lu and Song Han},
       year={2025},
       eprint={xxx},
