@@ -4,14 +4,12 @@
 
 # Long-RL: Scaling RL to Long Sequences
 
-[![Huggingface Models](https://img.shields.io/badge/Models-Huggingface%20Models-bron)](https://huggingface.co/xxx)
 [![Paper](https://img.shields.io/badge/Paper-Arvix%20Link-green)](https://arxiv.org/abs/xxx)
 [![Code License](https://img.shields.io/badge/Code%20License-Apache_2.0-yellow.svg)](https://github.com/NVlabs/Long-RL/blob/main/LICENSE)
-![Weight License](https://img.shields.io/badge/Weight%20License-CC%20By%20NC%20SA%204.0-red)
 
 <div align="center">
 
-[![Watch the video](assets/demo_video_first_frame.png)](https://www.youtube.com/watch?v=nyfEmRfcc5M)
+[![Watch the video](assets/demo_video_first_frame.png)](https://www.youtube.com/watch?v=65P6YbUJs0Y)
 
 </div>
 
