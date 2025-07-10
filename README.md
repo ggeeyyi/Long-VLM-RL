@@ -11,7 +11,7 @@
 
 <div align="center">
 
-[![Watch the video](assets/demo_video_first_frame.png)](https://www.youtube.com/watch?v=hcb3e48rOus)
+[![Watch the video](assets/demo_video_first_frame.png)](https://www.youtube.com/watch?v=CvajPddLQ1E)
 
 </div>
 
