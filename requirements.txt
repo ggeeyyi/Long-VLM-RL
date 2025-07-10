@@ -1,0 +1,33 @@
+accelerate
+codetiming
+datasets
+liger-kernel
+mathruler
+numpy
+omegaconf
+pandas
+peft
+pillow
+pyarrow>=15.0.0
+pylatexenc
+qwen-vl-utils
+ray[default]
+tensordict
+torchdata
+transformers==4.52.4
+flash-attn>=2.4.3
+vllm==0.9.1
+wandb
+# For vila models
+s2wrapper@git+https://github.com/bfshi/scaling_on_scales
+# For image/video diffusion
+diffusers
+imageio
+piq
+# For omni
+audioread
+librosa==0.11.0
+ffmpeg==1.4
+ffmpeg-python==0.2.0
+qwen-omni-utils==0.0.4
+soundfile==0.13.1
