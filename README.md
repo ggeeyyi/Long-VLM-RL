@@ -4,7 +4,7 @@
 
 # Long-RL: Scaling RL to Long Sequences
 
-[![Paper](https://img.shields.io/badge/Paper-Arvix%20Link-green)](https://arxiv.org/abs/xxx)
+[![Paper](https://img.shields.io/badge/Paper-Arvix%20Link-green)](https://arxiv.org/abs/2507.07966)
 [![Code License](https://img.shields.io/badge/Code%20License-Apache_2.0-yellow.svg)](https://github.com/NVlabs/Long-RL/blob/main/LICENSE)
 
 <div align="center">
@@ -28,7 +28,7 @@
 
 
 ## News
-- [x] [2025.7.10] We release [Paper](http://arxiv.org/abs/xxx) and this GitHub repo [Long-RL](https://github.com/NVlabs/Long-RL).
+- [x] [2025.7.10] We release [Paper](https://arxiv.org/abs/2507.07966) and this GitHub repo [Long-RL](https://github.com/NVlabs/Long-RL).
 
 ## Highlights
 1. **Hour-level long video RL training on a single node**:  We supports RL training on hour-level videos (3,600 frames - 256k tokens) with sequence parallel, on a single A100 node (8 GPUs). `examples/new_supports/qwen2_5_vl_3b_video_1h.sh`
@@ -55,7 +55,7 @@ Support algorithms:
   - `examples/new_supports/qwen2_5_vl_3b_video_grpo.sh`
   - `examples/new_supports/qwen2_5_vl_3b_video_reinforce.sh`
 
-**Scaling RL to Long Videos [[Paper](http://arxiv.org/abs/xxx)]** <br />
+**Scaling RL to Long Videos [[Paper](https://arxiv.org/abs/2507.07966)]** <br />
 [Yukang Chen](https://yukangchen.com/), [Wei Huang](https://aaron-weihuang.com/), [Baifeng Shi](https://bfshi.github.io/), [Qinghao Hu](https://tonyhao.xyz/), [Hanrong Ye](https://sites.google.com/site/yhrspace/home), [Ligeng Zhu](https://lzhu.me/), [Zhijian Liu](https://zhijianliu.com), [Pavlo Molchanov](https://www.pmolchanov.com/), [Jan Kautz](https://jankautz.com), [Xiaojuan Qi](https://xjqi.github.io/), [Sifei Liu](https://sifeiliu.net/),[Hongxu Yin](https://hongxu-yin.github.io/), [Yao Lu](https://scholar.google.com/citations?user=OI7zFmwAAAAJ&hl=en), [Song Han](http://songhan.mit.edu/) <br />
 
 We introduce a full-stack framework that scales up reasoning in vision-language models (VLMs) to long videos, leveraging reinforcement learning.
@@ -168,7 +168,7 @@ Please consider to cite our paper and this framework, if they are helpful in you
       title={Scaling RL to Long Videos},
       author={Yukang Chen and Wei Huang and Baifeng Shi and Qinghao Hu and Hanrong Ye and Ligeng Zhu and Zhijian Liu and Pavlo Molchanov and Jan Kautz and Xiaojuan Qi and Sifei Liu and Hongxu Yin and Yao Lu and Song Han},
       year={2025},
-      eprint={xxx},
+      eprint={2507.07966},
       archivePrefix={arXiv},
       primaryClass={cs.CV}
 }
