@@ -9,7 +9,7 @@
 
 <div align="center">
 
-[![Watch the video](assets/demo_video_first_frame.png)](https://www.youtube.com/watch?v=65P6YbUJs0Y)
+[![Watch the video](assets/demo_video_first_frame.png)](https://www.youtube.com/watch?v=ykbblK2jiEg)
 
 </div>
 
