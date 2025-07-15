@@ -24,7 +24,6 @@ from einops import rearrange
 from ray.experimental.tqdm_ray import tqdm
 from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from diffusers import StableDiffusion3Pipeline, FlowMatchEulerDiscreteScheduler
 
 from ...protocol import DataProto
 from ...trainer.core_algos import average_loss, compute_kl, compute_policy_loss
@@ -40,8 +39,6 @@ from ...utils.ulysses import (
 )
 from .base import BasePPOActor
 from .config import ActorConfig
-from ..diffusion_helper import compute_log_prob_flow_grpo
-
 
 try:
     from flash_attn.bert_padding import index_first_axis, pad_input, rearrange, unpad_input
@@ -115,7 +112,7 @@ def prepare_inputs_for_sp_mm(inputs: torch.Tensor, attention_mask: torch.Tensor,
 
     # Step 2: Find video token position and validate
     video_token_indice = image_labels[0].nonzero(as_tuple=True)
-    assert len(video_token_indice) == 1, f"Sample requires exactly one video token {video_token_id}"
+    assert len(video_token_indice) == 1, f"Sample requires exactly one video token {video_token_indice}"
     video_token_indice = video_token_indice[0]
     all_match = image_labels[:, video_token_indice].all()
     assert all_match, "Video token in all samples should be the same location, i.e., after system prompt"
@@ -203,15 +200,6 @@ class DataParallelPPOActor(BasePPOActor):
         self.vila_model = config.vila_model
         if config.vila_model:
             self._forward_micro_batch = self._forward_micro_batch_vila
-        elif config.diffusion:
-            self._forward_micro_batch = self._forward_micro_batch_diffusion
-            self.update_policy = self.update_policy_diffusion
-            self.compute_log_prob = self.compute_log_prob_diffusion
-            if config.scheduler == "":
-                scheduler = os.path.join(config.model.model_path, "scheduler")
-            else:
-                scheduler = config.scheduler
-            self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(scheduler)
         else:
             self._forward_micro_batch = self._forward_micro_batch_ori
 

@@ -17,11 +17,13 @@ Rollout config
 
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Optional
+from verl.workers.actor.config import FSDPConfig, OffloadConfig, ModelConfig
 
 
 @dataclass
 class RolloutConfig:
     name: str = "vllm"
+    model_path: Optional[str] = None
     n: int = 1
     temperature: float = 1.0
     top_p: float = 1.0
@@ -29,7 +31,7 @@ class RolloutConfig:
     seed: int = 1
     limit_images: int = 0
     dtype: str = "bf16"
-    gpu_memory_utilization: float = 0.6
+    gpu_memory_utilization: float = 0.5
     ignore_eos: bool = False
     enforce_eager: bool = False
     enable_chunked_prefill: bool = False  # only for v0 engine
@@ -56,7 +58,15 @@ class RolloutConfig:
     height: int = 480
     width: int = 832
     audio_max_length: int = 10000  # max length of audio feature, used for padding in dataset
-    num_chunk_seq: int = -1
+    ulysses_size: int = 1
+    global_batch_size: int = 128
+    global_batch_size_per_device: int = field(default=-1, init=False)
+    micro_batch_size_per_device_for_update: int = 4
+    micro_batch_size_per_device_for_experience: int = 16
+    fsdp: FSDPConfig = field(default_factory=FSDPConfig)
+    offload: OffloadConfig = field(default_factory=OffloadConfig)
+    model: ModelConfig = field(default_factory=ModelConfig)
+    num_chunk_seq: int = 1
 
     def to_dict(self):
         return asdict(self)

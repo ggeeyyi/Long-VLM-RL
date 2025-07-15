@@ -377,6 +377,14 @@ class RLHFDataset(Dataset):
                 model_inputs = self.processor(resized_images, [prompt], add_special_tokens=False, return_tensors="pt")
                 input_ids = model_inputs.pop("input_ids")[0]
                 attention_mask = model_inputs.pop("attention_mask")[0]
+                
+                # Mask image tokens in attention_mask if mask_image is True
+                if example.get("mask_image", False):
+                    # Find image token positions and mask them in attention_mask
+                    image_token_id = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
+                    if image_token_id is not None:
+                        image_positions = (input_ids == image_token_id)
+                        attention_mask = attention_mask.masked_fill(image_positions, 0)      
                 example["multi_modal_data"] = {"images": images}
                 #image_token_id = self.processor.tokenizer.convert_tokens_to_ids("<|image_pad|>")
                 #max_prompt_length += (input_ids==image_token_id).sum()

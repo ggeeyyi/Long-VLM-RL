@@ -41,7 +41,6 @@ from transformers.models.qwen2_5_omni.processing_qwen2_5_omni import (
     Qwen2_5OmniProcessor)
 from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniPreTrainedModel, Qwen2_5OmniPreTrainedModelForConditionalGeneration,Qwen2_5OmniThinkerForConditionalGeneration
 from transformers.modeling_utils import no_init_weights
-from diffusers import StableDiffusion3Pipeline, WanPipeline
 
 from ..models.monkey_patch import apply_ulysses_patch
 from ..protocol import DataProto
@@ -63,7 +62,7 @@ from ..utils.tokenizer import get_processor, get_tokenizer
 from ..utils.torch_dtypes import PrecisionType
 from ..utils.torch_functional import AnyPrecisionAdamW, get_constant_schedule_with_warmup
 from .config import ActorConfig, CriticConfig, FSDPConfig, ModelConfig, OptimConfig, WorkerConfig
-from .rollout import vLLMRollout, StableDiffusionRollout, WanRollout
+from .rollout import vLLMRollout
 from .sharding_manager import FSDPVLLMShardingManager
 from .sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
 
@@ -373,159 +372,7 @@ class FSDPWorker(Worker):
                 offload_fsdp_model(self.ref_fsdp_module)
                 print_gpu_memory_usage(f"After offload {role} model during init")
 
-    def _build_model_optimizer_diffusion(self, model_config: ModelConfig, fsdp_config: FSDPConfig, optim_config: Optional[OptimConfig], padding_free: bool, role: Literal["actor", "critic", "ref"]):
-        if role != "ref":  # ref model's tokenizer is same as actor
-            self.processor = get_processor(
-                model_config.model_path,
-                trust_remote_code=model_config.trust_remote_code,
-                use_fast=True,
-                diffusion=True,
-            )
-            if "wan" in model_config.model_path.lower():
-                self.model_config = WanPipeline.load_config(model_config.model_path)
-            else:
-                self.model_config = StableDiffusion3Pipeline.load_config(model_config.model_path)
-            self.print_rank0(f"Model config: {self.model_config}")
-
-        if fsdp_config.torch_dtype is None:
-            torch_dtype = torch.float32 if role != "ref" else torch.bfloat16
-        else:
-            torch_dtype = PrecisionType.to_dtype(fsdp_config.torch_dtype)
-
-        if (not fsdp_config.enable_rank0_init) or self.device_mesh.get_local_rank("fsdp") == 0:
-            if "wan" in model_config.model_path.lower():
-                model = WanPipeline.from_pretrained(
-                    model_config.model_path,
-                    torch_dtype=torch_dtype,
-                    low_cpu_mem_usage=True,
-                ).transformer
-            else:
-                model = StableDiffusion3Pipeline.from_pretrained(
-                    model_config.model_path,
-                    torch_dtype=torch_dtype,
-                    low_cpu_mem_usage=True,
-                ).transformer
-            if fsdp_config.enable_rank0_init:
-                model.to("cpu")
-        else:
-            with no_init_weights(), init_empty_weights():
-                if "wan" in model_config.model_path.lower():
-                    model = WanPipeline.from_pretrained(
-                        model_config.model_path,
-                        torch_dtype=torch_dtype,
-                        low_cpu_mem_usage=True,
-                    ).transformer
-                else:
-                    model = StableDiffusion3Pipeline.from_pretrained(
-                        model_config.model_path,
-                        torch_dtype=torch_dtype,
-                        low_cpu_mem_usage=True,
-                    ).transformer
-            if fsdp_config.enable_rank0_init:
-                model.to("cpu")
-
-        model = cast(PreTrainedModel, model)  # lint
-        # model.tie_weights()  # avoid hanging
-        model = model.to(torch_dtype)
-
-        if role == "ref":
-            model.requires_grad_(False)
-
-        dist.barrier()
-        print_model_size(model)
-        print_gpu_memory_usage("After huggingface model init")
-        mixed_precision = MixedPrecision(
-            param_dtype=PrecisionType.to_dtype(fsdp_config.mp_param_dtype),
-            reduce_dtype=PrecisionType.to_dtype(fsdp_config.mp_reduce_dtype),
-            buffer_dtype=PrecisionType.to_dtype(fsdp_config.mp_buffer_dtype),
-        )
-        auto_wrap_policy = get_fsdp_wrap_policy(model)
-        self.print_rank0(f"FSDP wrap policy: {auto_wrap_policy}.")
-
-        if self.device_mesh.ndim == 2:
-            if fsdp_config.enable_full_shard:
-                sharding_strategy = ShardingStrategy.HYBRID_SHARD
-            else:
-                sharding_strategy = ShardingStrategy._HYBRID_SHARD_ZERO2
-        else:
-            if fsdp_config.enable_full_shard:
-                sharding_strategy = ShardingStrategy.FULL_SHARD
-            else:
-                sharding_strategy = ShardingStrategy.SHARD_GRAD_OP
-
-        if fsdp_config.enable_cpu_offload:
-            cpu_offload = CPUOffload(offload_params=True)
-        else:
-            cpu_offload = None
-
-        if fsdp_config.enable_rank0_init:
-            sync_module_states = True
-            param_init_fn = get_init_fn(model, device="cuda") if self.rank != 0 else None
-        else:
-            sync_module_states = False
-            param_init_fn = None
-
-        fsdp_module = FSDP(
-            model,
-            sharding_strategy=sharding_strategy,
-            cpu_offload=cpu_offload,
-            auto_wrap_policy=auto_wrap_policy,
-            mixed_precision=mixed_precision,
-            param_init_fn=param_init_fn,
-            device_id=torch.cuda.current_device(),
-            sync_module_states=sync_module_states,
-            forward_prefetch=False,
-            use_orig_params=fsdp_config.use_orig_params,
-            device_mesh=self.device_mesh,
-        )
-        print_gpu_memory_usage("After FSDP module init")
-
-        if role in ["actor", "critic"]:
-            self.fsdp_module = fsdp_module
-            if optim_config.strategy == "adamw":
-                self.optimizer = torch.optim.AdamW(
-                    filter(lambda p: p.requires_grad, self.fsdp_module.parameters()),
-                    lr=optim_config.lr,
-                    betas=optim_config.betas,
-                    weight_decay=optim_config.weight_decay,
-                    fused=True,
-                )
-            elif optim_config.strategy == "adamw_bf16":
-                self.optimizer = AnyPrecisionAdamW(
-                    filter(lambda p: p.requires_grad, self.fsdp_module.parameters()),
-                    lr=optim_config.lr,
-                    betas=optim_config.betas,
-                    weight_decay=optim_config.weight_decay,
-                )
-            else:
-                raise NotImplementedError(f"Optimizer {optim_config.strategy} not supported.")
-
-            if optim_config.lr_warmup_steps is not None:
-                num_warmup_steps = optim_config.lr_warmup_steps
-            else:
-                num_warmup_steps = int(optim_config.lr_warmup_ratio * optim_config.training_steps)
-
-            self.lr_scheduler = get_constant_schedule_with_warmup(
-                optimizer=self.optimizer, num_warmup_steps=num_warmup_steps
-            )
-            print_gpu_memory_usage("After optimizer init")
-            if self._use_param_offload:
-                offload_fsdp_model(self.fsdp_module)
-                print_gpu_memory_usage(f"After offload {role} model during init")
-
-            if self._use_optimizer_offload:
-                offload_fsdp_optimizer(optimizer=self.optimizer)
-                print_gpu_memory_usage(f"After offload {role} optimizer during init")
-        else:
-            self.ref_fsdp_module = fsdp_module
-            if self._use_ref_param_offload:
-                offload_fsdp_model(self.ref_fsdp_module)
-                print_gpu_memory_usage(f"After offload {role} model during init")
-
     def _build_rollout(self) -> None:
-        if self.diffusion:
-            self._build_rollout_diffusion()
-            return
 
         tp_size = self.config.rollout.tensor_parallel_size
         dp_size = self.world_size // tp_size
@@ -548,21 +395,6 @@ class FSDPWorker(Worker):
             vila_model="vila" in self.config.actor.model.model_path.lower(),
         )
         print_gpu_memory_usage("After vllm init")
-
-    def _build_rollout_diffusion(self) -> None:
-        if "wan" in self.config.actor.model.model_path.lower():
-            self.rollout = WanRollout(
-                model_path=self.config.actor.model.model_path,
-                config=self.config.rollout,
-            )
-        elif "stable-diffusion" in self.config.actor.model.model_path.lower():
-            self.rollout = StableDiffusionRollout(
-            model_path=self.config.actor.model.model_path,
-            config=self.config.rollout,
-        )
-        else:
-            raise ValueError(f"Model {self.config.actor.model.model_path} is not supported.")
-        print_gpu_memory_usage("After Rollout init")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):

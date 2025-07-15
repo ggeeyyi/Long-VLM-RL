@@ -15,7 +15,6 @@
 
 from .config import RolloutConfig
 from .vllm_rollout_spmd import vLLMRollout
-from .diffusion_rollout import StableDiffusionRollout, WanRollout
 
 
-__all__ = ["RolloutConfig", "vLLMRollout", "StableDiffusionRollout", "WanRollout"]
+__all__ = ["RolloutConfig", "vLLMRollout"]
