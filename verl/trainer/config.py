@@ -178,7 +178,9 @@ class PPOConfig:
         self.worker.actor.use_kl_loss = self.algorithm.use_kl_loss
         self.worker.actor.kl_penalty = self.algorithm.kl_penalty
         self.worker.actor.kl_coef = self.algorithm.kl_coef
-
+        if self.worker.rollout.model_path is None:
+            self.worker.rollout.model_path = self.worker.actor.model.model_path
+            
     def deep_post_init(self):
         recursive_post_init(self)
 

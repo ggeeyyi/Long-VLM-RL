@@ -41,6 +41,7 @@ from transformers.models.qwen2_5_omni.processing_qwen2_5_omni import (
     Qwen2_5OmniProcessor)
 from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniPreTrainedModel, Qwen2_5OmniPreTrainedModelForConditionalGeneration,Qwen2_5OmniThinkerForConditionalGeneration
 from transformers.modeling_utils import no_init_weights
+# from diffusers import StableDiffusion3Pipeline, WanPipeline
 
 from ..models.monkey_patch import apply_ulysses_patch
 from ..protocol import DataProto
@@ -61,7 +62,7 @@ from ..utils.model_utils import print_gpu_memory_usage, print_model_size
 from ..utils.tokenizer import get_processor, get_tokenizer
 from ..utils.torch_dtypes import PrecisionType
 from ..utils.torch_functional import AnyPrecisionAdamW, get_constant_schedule_with_warmup
-from .config import ActorConfig, CriticConfig, FSDPConfig, ModelConfig, OptimConfig, WorkerConfig
+from .config import ActorConfig, CriticConfig, FSDPConfig, ModelConfig, OptimConfig, RefConfig, RolloutConfig, WorkerConfig
 from .rollout import vLLMRollout
 from .sharding_manager import FSDPVLLMShardingManager
 from .sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManager
@@ -84,11 +85,12 @@ class FSDPWorker(Worker):
         # improve numerical stability
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
-
-        self._has_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
+        
+        self._has_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref", "actor_ref"]
         self._has_critic = self.role == "critic"
         self._has_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
-        self._has_ref = self.role in ["ref", "actor_rollout_ref"]
+        self._skip_rollout_init = self.role in ["actor_rollout","actor_rollout_ref"]
+        self._has_ref = self.role in ["ref", "actor_rollout_ref", "actor_ref"]
         if self._has_actor and self._has_critic:
             raise ValueError("Actor and critic cannot be both initialized.")
 
@@ -110,14 +112,19 @@ class FSDPWorker(Worker):
 
         if self._has_ref:  # NOTE: it seems that manual offload is slower than FSDP offload
             self._use_ref_param_offload = self.config.ref.offload.offload_params
+            
+        if self._has_rollout:
+            self._use_param_offload = self.config.rollout.offload.offload_params
+            self._use_optimizer_offload = self.config.rollout.offload.offload_optimizer
+            self._init_dist_mesh(self.config.rollout, "rollout")
 
         if self.config.vila_model:
             self.config.actor.vila_model = True
             self.config.ref.vila_model = True
-
+        
         self.diffusion = self.config.actor.diffusion
 
-    def _init_dist_mesh(self, config: Union[ActorConfig, CriticConfig], role: Literal["actor", "critic"]):
+    def _init_dist_mesh(self, config: Union[ActorConfig, CriticConfig, RefConfig, RolloutConfig], role: Literal["actor", "critic", "ref", "rollout"]):
         world_size = dist.get_world_size()
         # create main device mesh
         fsdp_size = config.fsdp.fsdp_size
@@ -166,13 +173,14 @@ class FSDPWorker(Worker):
         fsdp_config: FSDPConfig,
         optim_config: Optional[OptimConfig],
         ulysses_size: int,
-        role: Literal["actor", "critic", "ref"],
+        role: Literal["actor", "critic", "ref", "rollout"],
     ) -> None:
         if self.diffusion:
             self._build_model_optimizer_diffusion(model_config, fsdp_config, optim_config, role)
             return
 
         if role != "ref":  # ref model's tokenizer is same as actor
+        # if True:
             self.tokenizer = get_tokenizer(
                 model_config.tokenizer_path,
                 trust_remote_code=model_config.trust_remote_code,
@@ -373,6 +381,9 @@ class FSDPWorker(Worker):
                 print_gpu_memory_usage(f"After offload {role} model during init")
 
     def _build_rollout(self) -> None:
+        if self.diffusion:
+            self._build_rollout_diffusion()
+            return
 
         tp_size = self.config.rollout.tensor_parallel_size
         dp_size = self.world_size // tp_size
@@ -381,23 +392,24 @@ class FSDPWorker(Worker):
 
         rollout_device_mesh = init_device_mesh("cuda", mesh_shape=(dp_size, tp_size), mesh_dim_names=("dp", "tp"))
         self.rollout = vLLMRollout(
-            model_path=self.config.actor.model.model_path,
+            model_path=self.config.rollout.model.model_path,
             config=self.config.rollout,
             tokenizer=self.tokenizer,
             processor=self.processor,
             model_vision_encoder=self.model_vision_encoder,
         )
         self.rollout_sharding_manager = FSDPVLLMShardingManager(
-            module=self.fsdp_module,
+            module=self.ref_fsdp_module,
             inference_engine=self.rollout.inference_engine,
             device_mesh=rollout_device_mesh,
             use_param_offload=self._use_param_offload,
-            vila_model="vila" in self.config.actor.model.model_path.lower(),
+            vila_model="vila" in self.config.rollout.model.model_path.lower(),
         )
         print_gpu_memory_usage("After vllm init")
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
+        
         if self._has_critic:
             self._build_model_optimizer(
                 model_config=self.config.critic.model,
@@ -424,6 +436,15 @@ class FSDPWorker(Worker):
                 ulysses_size=self.config.ref.ulysses_size,
                 role="ref",
             )
+            
+        if self._has_rollout and not self._skip_rollout_init:
+            self._build_model_optimizer(
+                model_config=self.config.rollout.model,
+                fsdp_config=self.config.rollout.fsdp,
+                optim_config=None,
+                ulysses_size=self.config.rollout.ulysses_size,
+                role="rollout",
+            )
 
         self.model_vision_encoder = None
         if self._has_actor:
@@ -449,7 +470,7 @@ class FSDPWorker(Worker):
                 critic_module=self.fsdp_module,
                 critic_optimizer=self.optimizer,
             )
-
+ 
         if self._has_rollout:  # must after actor
             self._build_rollout()
 
@@ -536,7 +557,7 @@ class FSDPWorker(Worker):
 
                             if i % num_repeat > 0:
                                 continue
-                            multi_modal_inputs = dict(self.processor.video_processor(images=None, videos=[video.to(torch.cuda.current_device()) for video in videos], return_tensors="pt"))
+                            multi_modal_inputs = dict(self.processor.image_processor(images=None, videos=[video.to(torch.cuda.current_device()) for video in videos], return_tensors="pt"))
                             multi_modal_inputs = {k: v.to(torch.cuda.current_device()) for k, v in multi_modal_inputs.items()}
                             for k in multi_modal_inputs:
                                 if "pixel_values" in k:
@@ -576,12 +597,12 @@ class FSDPWorker(Worker):
                 metrics["perf/mfu_actor"] = (
                     estimated_flops * self.config.actor.ppo_epochs / (promised_flops * self.world_size)
                 )
-                metrics["perf/max_memory_allocated_gb"] = (
-                    torch.cuda.max_memory_allocated() - self.rollout_sharding_manager.freed_bytes
-                ) / (1024**3)
-                metrics["perf/max_memory_reserved_gb"] = (
-                    torch.cuda.max_memory_reserved() - self.rollout_sharding_manager.freed_bytes
-                ) / (1024**3)
+                # metrics["perf/max_memory_allocated_gb"] = (
+                #     torch.cuda.max_memory_allocated() - self.rollout_sharding_manager.freed_bytes
+                # ) / (1024**3)
+                # metrics["perf/max_memory_reserved_gb"] = (
+                #     torch.cuda.max_memory_reserved() - self.rollout_sharding_manager.freed_bytes
+                # ) / (1024**3)
                 metrics["perf/cpu_memory_used_gb"] = psutil.virtual_memory().used / (1024**3)
 
             self.lr_scheduler.step()
@@ -605,8 +626,19 @@ class FSDPWorker(Worker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def prepare_rollout_engine(self):
-        self.rollout_sharding_manager.load_vllm_and_sync_weights()
+        if self.rollout is None:
+            self._build_rollout()
 
+        actor_model_path = self.config.actor.model.model_path
+        rollout_model_path = self.config.rollout.model.model_path
+
+        if actor_model_path == rollout_model_path:
+            print("Actor and rollout models are the same. Syncing weights to vLLM.")
+        else:
+            print(f"Rollout model ({rollout_model_path}) is different from actor model ({actor_model_path}). Skipping weight synchronization.")
+        
+        self.rollout_sharding_manager.load_vllm_and_sync_weights()
+            
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def release_rollout_engine(self):
         self.rollout_sharding_manager.offload_vllm()

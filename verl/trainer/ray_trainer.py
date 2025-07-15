@@ -62,6 +62,7 @@ class Role(IntEnum):
     RefPolicy = auto()
     RewardModel = auto()
     ActorRolloutRef = auto()
+    ActorRef = auto()
 
 
 @dataclass
@@ -267,11 +268,47 @@ class RayPPOTrainer:
 
         # create actor and rollout
         if self.hybrid_engine:
-            resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRolloutRef)
-            actor_rollout_ref_cls = RayClassWithInitArgs(
-                cls=self.role_worker_mapping[Role.ActorRolloutRef], config=self.config.worker, role="actor_rollout_ref"
-            )
-            self.resource_pool_to_cls[resource_pool]["actor_rollout_ref"] = actor_rollout_ref_cls
+            # now support three combination of roles: [Actor, Rollout, Ref], [Actor_Ref, Rollout], [Actor_Rollout_Ref]
+            
+            # Create Actor worker
+            if Role.Actor in self.role_worker_mapping:
+                actor_resource_pool = self.resource_pool_manager.get_resource_pool(Role.Actor)
+                actor_cls = RayClassWithInitArgs(
+                    cls=self.role_worker_mapping[Role.Actor], config=self.config.worker, role="actor"
+                )
+                self.resource_pool_to_cls[actor_resource_pool]["actor"] = actor_cls
+            
+            # Create Rollout worker
+            if Role.Rollout in self.role_worker_mapping:
+                rollout_resource_pool = self.resource_pool_manager.get_resource_pool(Role.Rollout)
+                rollout_cls = RayClassWithInitArgs(
+                    cls=self.role_worker_mapping[Role.Rollout], config=self.config.worker, role="rollout"
+                )
+                self.resource_pool_to_cls[rollout_resource_pool]["rollout"] = rollout_cls
+            
+            # Create Reference Policy worker if needed
+            if self.use_reference_policy and Role.RefPolicy in self.role_worker_mapping:
+                ref_resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
+                ref_cls = RayClassWithInitArgs(
+                    cls=self.role_worker_mapping[Role.RefPolicy], config=self.config.worker, role="ref"
+                )
+                self.resource_pool_to_cls[ref_resource_pool]["ref"] = ref_cls
+            
+            # Fallback to combined ActorRolloutRef if separate roles are not configured
+            if Role.ActorRolloutRef in self.role_worker_mapping:
+                resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRolloutRef)
+                actor_rollout_ref_cls = RayClassWithInitArgs(
+                    cls=self.role_worker_mapping[Role.ActorRolloutRef], config=self.config.worker, role="actor_rollout_ref"
+                )
+                self.resource_pool_to_cls[resource_pool]["actor_rollout_ref"] = actor_rollout_ref_cls
+            
+            # Create ActorRef worker
+            if Role.ActorRef in self.role_worker_mapping:
+                actor_ref_resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRef)
+                actor_ref_cls = RayClassWithInitArgs(
+                    cls=self.role_worker_mapping[Role.ActorRef], config=self.config.worker, role="actor_ref"
+                )
+                self.resource_pool_to_cls[actor_ref_resource_pool]["actor_ref"] = actor_ref_cls
         else:
             raise NotImplementedError
 
@@ -314,10 +351,81 @@ class RayPPOTrainer:
             self.rm_wg = all_wg["rm"]
             self.rm_wg.init_model()
 
-        # we should create rollout at the end so that vllm can have a better estimation of kv cache memory
-        self.actor_rollout_ref_wg = all_wg["actor_rollout_ref"]
-        self.actor_rollout_ref_wg.init_model()
+        # Initialize workers based on what's available
+        if "actor" in all_wg and "rollout" in all_wg:   # actor + rollout (ref is optional)
+            # Separate actor and rollout workers
+            self.actor_wg = all_wg["actor"]
+            self.rollout_wg = all_wg["rollout"]
+            self.actor_wg.init_model()
+            self.rollout_wg.init_model()
+            
+            if self.use_reference_policy:
+                self.ref_wg = all_wg["ref"] # ref_wg is the same as actor_wg
+                self.ref_wg.init_model()
+            
+            # Set up compatibility attributes
+            self.actor_rollout_ref_wg = None
+            self.actor_ref_wg = None
+        elif "actor_rollout_ref" in all_wg:   # actor = rollout = ref
+            # Combined worker (fallback)
+            self.actor_rollout_ref_wg = all_wg["actor_rollout_ref"]
+            self.actor_rollout_ref_wg.init_model()
+            
+            # Set up compatibility attributes
+            self.actor_wg = None
+            self.rollout_wg = None
+            self.ref_wg = None
+        elif "actor_ref" in all_wg:   # actor = ref (rollout is optional)
+            # Combined worker (fallback)
+            self.actor_ref_wg = all_wg["actor_ref"]
+            self.actor_ref_wg.init_model()
+            self.rollout_wg = all_wg["rollout"]
+            self.rollout_wg.init_model()
+            
+            # Set up compatibility attributes
+            self.actor_rollout_ref_wg = None
+            self.actor_wg = None
+            self.ref_wg = None
 
+        else:
+            raise ValueError("Neither separate Actor/Rollout workers nor combined ActorRolloutRef worker found!")
+    
+    def _get_actor_worker(self):
+        """Get the actor worker (either separate or from combined worker)"""
+        if self.actor_wg is not None:
+            return self.actor_wg
+        elif self.actor_rollout_ref_wg is not None:
+            return self.actor_rollout_ref_wg
+        elif self.actor_ref_wg is not None:
+            return self.actor_ref_wg
+        else:
+            raise RuntimeError("No actor worker available")
+
+    def _get_rollout_worker(self):
+        """Get the rollout worker (either separate or from combined worker)"""
+        if self.rollout_wg is not None:
+            return self.rollout_wg
+        elif self.actor_rollout_ref_wg is not None:
+            return self.actor_rollout_ref_wg
+        else:
+            raise RuntimeError("No rollout worker available")
+
+    def _get_ref_worker(self):
+        """Get the reference policy worker (either separate or from combined worker)"""
+        if self.ref_wg is not None:
+            return self.ref_wg
+        elif self.actor_rollout_ref_wg is not None:
+            return self.actor_rollout_ref_wg
+        elif self.actor_ref_wg is not None:
+            return self.actor_ref_wg
+        else:
+            raise RuntimeError("No reference policy worker available")
+
+    def _get_rollout_world_size(self):
+        """Get the world size of the rollout worker"""
+        rollout_worker = self._get_rollout_worker()
+        return rollout_worker.world_size
+    
     def _save_checkpoint(self) -> None:
         # path: {save_checkpoint_path}/global_step_{global_step}/{actor,critic}
         if self.val_reward_score > self.best_val_reward_score:
@@ -332,7 +440,10 @@ class RayPPOTrainer:
         )
         folder_path = os.path.join(self.config.trainer.save_checkpoint_path, f"global_step_{self.global_step}")
         actor_path = os.path.join(folder_path, "actor")
-        self.actor_rollout_ref_wg.save_checkpoint(actor_path, save_model_only=self.config.trainer.save_model_only)
+        
+        # Save actor checkpoint using the appropriate worker
+        actor_worker = self._get_actor_worker()
+        actor_worker.save_checkpoint(actor_path, save_model_only=self.config.trainer.save_model_only)
 
         if self.use_critic:
             critic_path = os.path.join(folder_path, "critic")
@@ -367,7 +478,11 @@ class RayPPOTrainer:
         print(f"Load from checkpoint: {self.config.trainer.load_checkpoint_path}.")
         self.global_step = int(self.config.trainer.load_checkpoint_path.strip(os.path.sep).split("global_step_")[-1])
         actor_path = os.path.join(self.config.trainer.load_checkpoint_path, "actor")
-        self.actor_rollout_ref_wg.load_checkpoint(actor_path)
+        
+        # Load actor checkpoint using the appropriate worker
+        actor_worker = self._get_actor_worker()
+        actor_worker.load_checkpoint(actor_path)
+        
         if self.use_critic:
             critic_path = os.path.join(self.config.trainer.load_checkpoint_path, "critic")
             self.critic_wg.load_checkpoint(critic_path)
@@ -405,7 +520,9 @@ class RayPPOTrainer:
         print("Start validation...")
 
         if not self.diffusion:
-            self.actor_rollout_ref_wg.prepare_rollout_engine()
+            rollout_worker = self._get_rollout_worker()
+            rollout_worker.prepare_rollout_engine()
+            
         print("***len(val_dataloader)***", len(self.val_dataloader))
         for idx, batch_dict in enumerate(self.val_dataloader):
             test_batch = DataProto.from_single_dict(batch_dict)
@@ -429,12 +546,14 @@ class RayPPOTrainer:
                 test_gen_batch.meta_info["max_pixels"] = self.config.data.max_pixels
 
             if not self.diffusion:
-                test_gen_batch, pad_size = pad_dataproto_to_divisor(test_gen_batch, self.actor_rollout_ref_wg.world_size)
-                test_output_gen_batch = self.actor_rollout_ref_wg.generate_sequences(test_gen_batch)
+                rollout_worker = self._get_rollout_worker()
+                test_gen_batch, pad_size = pad_dataproto_to_divisor(test_gen_batch, rollout_worker.world_size)
+                test_output_gen_batch = rollout_worker.generate_sequences(test_gen_batch)
                 test_output_gen_batch = unpad_dataproto(test_output_gen_batch, pad_size=pad_size * repeat_times)
             else:
                 # For diffusion, directly generate without padding/unpadding
-                test_output_gen_batch = self.actor_rollout_ref_wg.generate_sequences(test_gen_batch)
+                rollout_worker = self._get_rollout_worker()
+                test_output_gen_batch = rollout_worker.generate_sequences(test_gen_batch)
 
             # repeat to align with repeated responses in rollout
             if not self.diffusion:
@@ -471,7 +590,8 @@ class RayPPOTrainer:
                 reward_metrics_lst[key].extend(value)
 
         if not self.diffusion:
-            self.actor_rollout_ref_wg.release_rollout_engine()
+            rollout_worker = self._get_rollout_worker()
+            rollout_worker.release_rollout_engine()
 
         self._maybe_log_val_generations(sample_inputs, sample_outputs, sample_labels, sample_scores)
         self.val_reward_score = torch.cat(reward_tensor_lst, dim=0).sum(-1).mean().item()
@@ -484,7 +604,7 @@ class RayPPOTrainer:
         attention_mask = batch.batch["attention_mask"]
         batch_size = attention_mask.shape[0]
         global_seqlen_lst = batch.batch["attention_mask"].view(batch_size, -1).sum(-1).tolist()  # (train_batch_size,)
-        world_size = self.actor_rollout_ref_wg.world_size
+        world_size = self._get_rollout_world_size()
         global_partition_lst = get_seqlen_balanced_partitions(
             global_seqlen_lst, k_partitions=world_size, equal_size=True
         )
@@ -522,13 +642,14 @@ class RayPPOTrainer:
                 )
 
             # generate a batch
-            gen_batch_output = self.actor_rollout_ref_wg.generate_sequences(gen_batch)
+            rollout_worker = self._get_rollout_worker()
+            gen_batch_output = rollout_worker.generate_sequences(gen_batch)
 
             if self.config.algorithm.adv_estimator == "remax":
                 gen_baseline_batch = deepcopy(gen_batch)
                 gen_baseline_batch.meta_info["temperature"] = 0
                 gen_baseline_batch.meta_info["n"] = 1
-                gen_baseline_output = self.actor_rollout_ref_wg.generate_sequences(gen_baseline_batch)
+                gen_baseline_output = rollout_worker.generate_sequences(gen_baseline_batch)
 
                 new_batch = new_batch.union(gen_baseline_output)
                 reward_baseline_tensor, _ = ray.get(self.reward_fn.compute_reward.remote(new_batch))
@@ -620,9 +741,10 @@ class RayPPOTrainer:
                 # make a batch of data
                 with timer("gen", timing_raw):
                     if not self.diffusion:
-                        self.actor_rollout_ref_wg.prepare_rollout_engine()
+                        rollout_worker = self._get_rollout_worker()
+                        rollout_worker.prepare_rollout_engine()
                         batch = self._make_batch_data(metrics=metrics)
-                        self.actor_rollout_ref_wg.release_rollout_engine()
+                        rollout_worker.release_rollout_engine()
                     else:
                         batch = self._make_batch_data(metrics=metrics)
                 # balance the number of valid tokens on each dp rank.
@@ -643,13 +765,14 @@ class RayPPOTrainer:
                 # recompute old_log_probs
                 if not self.diffusion:
                     with timer("old", timing_raw):
-                        old_log_probs = self.actor_rollout_ref_wg.compute_log_probs(batch)
+                        actor_worker = self._get_actor_worker()
+                        old_log_probs = actor_worker.compute_log_probs(batch)
                         batch = batch.union(old_log_probs)
 
                 # compute ref_log_probs
                 if self.use_reference_policy:
                     with timer("ref", timing_raw):
-                        ref_log_probs = self.actor_rollout_ref_wg.compute_ref_log_probs(batch)
+                        ref_log_probs = self._get_ref_worker().compute_ref_log_probs(batch)
                         batch = batch.union(ref_log_probs)
 
                 # compute values
@@ -694,7 +817,8 @@ class RayPPOTrainer:
                 # update actor
                 if self.config.trainer.critic_warmup <= self.global_step:
                     with timer("update_actor", timing_raw):
-                        actor_output = self.actor_rollout_ref_wg.update_actor(batch)
+                        actor_worker = self._get_actor_worker()
+                        actor_output = actor_worker.update_actor(batch)
 
                     actor_metrics = reduce_metrics(actor_output.non_tensor_batch)
                     metrics.update(actor_metrics)

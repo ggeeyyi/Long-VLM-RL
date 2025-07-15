@@ -55,18 +55,36 @@ class Runner:
 
         # define worker classes
         ray_worker_group_cls = RayWorkerGroup
-        role_worker_mapping = {
-            Role.ActorRolloutRef: ray.remote(FSDPWorker),
-            Role.Critic: ray.remote(FSDPWorker),
-        }
+        seperate_rollout_roles = hasattr(config.worker.rollout, "model")
+        print(f"seperate_rollout_roles: {seperate_rollout_roles}")
+        if seperate_rollout_roles:
+            role_worker_mapping = {
+                Role.ActorRef: ray.remote(FSDPWorker),
+                Role.Critic: ray.remote(FSDPWorker),
+                Role.Rollout: ray.remote(FSDPWorker),
+            }
+        else:
+            role_worker_mapping = {
+                Role.ActorRolloutRef: ray.remote(FSDPWorker),
+                Role.Critic: ray.remote(FSDPWorker),
+            }
+
         global_pool_id = "global_pool"
         resource_pool_spec = {
             global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
         }
-        mapping = {
-            Role.ActorRolloutRef: global_pool_id,
-            Role.Critic: global_pool_id,
-        }
+
+        if seperate_rollout_roles:
+            mapping = {
+                Role.ActorRef: global_pool_id,
+                Role.Critic: global_pool_id,
+                Role.Rollout: global_pool_id,
+            }
+        else:
+            mapping = {
+                Role.ActorRolloutRef: global_pool_id,
+                Role.Critic: global_pool_id,
+            }
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
         if config.worker.reward.reward_type == "sequential":
