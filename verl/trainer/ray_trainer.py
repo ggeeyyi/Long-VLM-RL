@@ -268,47 +268,31 @@ class RayPPOTrainer:
 
         # create actor and rollout
         if self.hybrid_engine:
-            # now support three combination of roles: [Actor, Rollout, Ref], [Actor_Ref, Rollout], [Actor_Rollout_Ref]
-            
-            # Create Actor worker
-            if Role.Actor in self.role_worker_mapping:
-                actor_resource_pool = self.resource_pool_manager.get_resource_pool(Role.Actor)
-                actor_cls = RayClassWithInitArgs(
-                    cls=self.role_worker_mapping[Role.Actor], config=self.config.worker, role="actor"
-                )
-                self.resource_pool_to_cls[actor_resource_pool]["actor"] = actor_cls
-            
-            # Create Rollout worker
-            if Role.Rollout in self.role_worker_mapping:
-                rollout_resource_pool = self.resource_pool_manager.get_resource_pool(Role.Rollout)
-                rollout_cls = RayClassWithInitArgs(
-                    cls=self.role_worker_mapping[Role.Rollout], config=self.config.worker, role="rollout"
-                )
-                self.resource_pool_to_cls[rollout_resource_pool]["rollout"] = rollout_cls
-            
-            # Create Reference Policy worker if needed
-            if self.use_reference_policy and Role.RefPolicy in self.role_worker_mapping:
-                ref_resource_pool = self.resource_pool_manager.get_resource_pool(Role.RefPolicy)
-                ref_cls = RayClassWithInitArgs(
-                    cls=self.role_worker_mapping[Role.RefPolicy], config=self.config.worker, role="ref"
-                )
-                self.resource_pool_to_cls[ref_resource_pool]["ref"] = ref_cls
-            
-            # Fallback to combined ActorRolloutRef if separate roles are not configured
+            # now support two combination of roles: [Actor_Rollout_Ref], [Actor_Ref, Rollout]
+            # TODO: support [Actor, Rollout, Ref]
             if Role.ActorRolloutRef in self.role_worker_mapping:
                 resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRolloutRef)
                 actor_rollout_ref_cls = RayClassWithInitArgs(
                     cls=self.role_worker_mapping[Role.ActorRolloutRef], config=self.config.worker, role="actor_rollout_ref"
                 )
-                self.resource_pool_to_cls[resource_pool]["actor_rollout_ref"] = actor_rollout_ref_cls
-            
-            # Create ActorRef worker
-            if Role.ActorRef in self.role_worker_mapping:
+                self.resource_pool_to_cls[resource_pool]["actor_rollout_ref"] = actor_rollout_ref_cls       
+                print("init actor_rollout_ref")
+            # Create Rollout worker
+            elif Role.Rollout in self.role_worker_mapping and Role.ActorRef in self.role_worker_mapping:
+                rollout_resource_pool = self.resource_pool_manager.get_resource_pool(Role.Rollout)
+                rollout_cls = RayClassWithInitArgs(
+                    cls=self.role_worker_mapping[Role.Rollout], config=self.config.worker, role="rollout"
+                )
+                self.resource_pool_to_cls[rollout_resource_pool]["rollout"] = rollout_cls
+                print("init rollout")
                 actor_ref_resource_pool = self.resource_pool_manager.get_resource_pool(Role.ActorRef)
                 actor_ref_cls = RayClassWithInitArgs(
                     cls=self.role_worker_mapping[Role.ActorRef], config=self.config.worker, role="actor_ref"
                 )
                 self.resource_pool_to_cls[actor_ref_resource_pool]["actor_ref"] = actor_ref_cls
+                print("init actor_ref")
+            else:
+                raise ValueError("No valid role combination found!")
         else:
             raise NotImplementedError
 
@@ -352,49 +336,23 @@ class RayPPOTrainer:
             self.rm_wg.init_model()
 
         # Initialize workers based on what's available
-        if "actor" in all_wg and "rollout" in all_wg:   # actor + rollout (ref is optional)
-            # Separate actor and rollout workers
-            self.actor_wg = all_wg["actor"]
-            self.rollout_wg = all_wg["rollout"]
-            self.actor_wg.init_model()
-            self.rollout_wg.init_model()
-            
-            if self.use_reference_policy:
-                self.ref_wg = all_wg["ref"] # ref_wg is the same as actor_wg
-                self.ref_wg.init_model()
-            
-            # Set up compatibility attributes
-            self.actor_rollout_ref_wg = None
-            self.actor_ref_wg = None
-        elif "actor_rollout_ref" in all_wg:   # actor = rollout = ref
-            # Combined worker (fallback)
+        if "actor_rollout_ref" in all_wg:
             self.actor_rollout_ref_wg = all_wg["actor_rollout_ref"]
             self.actor_rollout_ref_wg.init_model()
-            
-            # Set up compatibility attributes
-            self.actor_wg = None
+            self.actor_ref_wg = None
             self.rollout_wg = None
-            self.ref_wg = None
-        elif "actor_ref" in all_wg:   # actor = ref (rollout is optional)
-            # Combined worker (fallback)
+        elif "actor_ref" in all_wg and "rollout" in all_wg:
             self.actor_ref_wg = all_wg["actor_ref"]
             self.actor_ref_wg.init_model()
             self.rollout_wg = all_wg["rollout"]
             self.rollout_wg.init_model()
-            
-            # Set up compatibility attributes
             self.actor_rollout_ref_wg = None
-            self.actor_wg = None
-            self.ref_wg = None
-
         else:
             raise ValueError("Neither separate Actor/Rollout workers nor combined ActorRolloutRef worker found!")
     
     def _get_actor_worker(self):
         """Get the actor worker (either separate or from combined worker)"""
-        if self.actor_wg is not None:
-            return self.actor_wg
-        elif self.actor_rollout_ref_wg is not None:
+        if self.actor_rollout_ref_wg is not None:
             return self.actor_rollout_ref_wg
         elif self.actor_ref_wg is not None:
             return self.actor_ref_wg
@@ -412,9 +370,7 @@ class RayPPOTrainer:
 
     def _get_ref_worker(self):
         """Get the reference policy worker (either separate or from combined worker)"""
-        if self.ref_wg is not None:
-            return self.ref_wg
-        elif self.actor_rollout_ref_wg is not None:
+        if self.actor_rollout_ref_wg is not None:
             return self.actor_rollout_ref_wg
         elif self.actor_ref_wg is not None:
             return self.actor_ref_wg
@@ -442,8 +398,7 @@ class RayPPOTrainer:
         actor_path = os.path.join(folder_path, "actor")
         
         # Save actor checkpoint using the appropriate worker
-        actor_worker = self._get_actor_worker()
-        actor_worker.save_checkpoint(actor_path, save_model_only=self.config.trainer.save_model_only)
+        self._get_actor_worker().save_checkpoint(actor_path, save_model_only=self.config.trainer.save_model_only)
 
         if self.use_critic:
             critic_path = os.path.join(folder_path, "critic")
@@ -480,8 +435,7 @@ class RayPPOTrainer:
         actor_path = os.path.join(self.config.trainer.load_checkpoint_path, "actor")
         
         # Load actor checkpoint using the appropriate worker
-        actor_worker = self._get_actor_worker()
-        actor_worker.load_checkpoint(actor_path)
+        self._get_actor_worker().load_checkpoint(actor_path)
         
         if self.use_critic:
             critic_path = os.path.join(self.config.trainer.load_checkpoint_path, "critic")
@@ -520,8 +474,7 @@ class RayPPOTrainer:
         print("Start validation...")
 
         if not self.diffusion:
-            rollout_worker = self._get_rollout_worker()
-            rollout_worker.prepare_rollout_engine()
+            self._get_rollout_worker().prepare_rollout_engine()
             
         print("***len(val_dataloader)***", len(self.val_dataloader))
         for idx, batch_dict in enumerate(self.val_dataloader):
@@ -741,10 +694,9 @@ class RayPPOTrainer:
                 # make a batch of data
                 with timer("gen", timing_raw):
                     if not self.diffusion:
-                        rollout_worker = self._get_rollout_worker()
-                        rollout_worker.prepare_rollout_engine()
+                        self._get_rollout_worker().prepare_rollout_engine()
                         batch = self._make_batch_data(metrics=metrics)
-                        rollout_worker.release_rollout_engine()
+                        self._get_rollout_worker().release_rollout_engine()
                     else:
                         batch = self._make_batch_data(metrics=metrics)
                 # balance the number of valid tokens on each dp rank.
@@ -765,8 +717,7 @@ class RayPPOTrainer:
                 # recompute old_log_probs
                 if not self.diffusion:
                     with timer("old", timing_raw):
-                        actor_worker = self._get_actor_worker()
-                        old_log_probs = actor_worker.compute_log_probs(batch)
+                        old_log_probs = self._get_actor_worker().compute_log_probs(batch)
                         batch = batch.union(old_log_probs)
 
                 # compute ref_log_probs
@@ -817,8 +768,7 @@ class RayPPOTrainer:
                 # update actor
                 if self.config.trainer.critic_warmup <= self.global_step:
                     with timer("update_actor", timing_raw):
-                        actor_worker = self._get_actor_worker()
-                        actor_output = actor_worker.update_actor(batch)
+                        actor_output = self._get_actor_worker().update_actor(batch)
 
                     actor_metrics = reduce_metrics(actor_output.non_tensor_batch)
                     metrics.update(actor_metrics)

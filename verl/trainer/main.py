@@ -55,7 +55,9 @@ class Runner:
 
         # define worker classes
         ray_worker_group_cls = RayWorkerGroup
-        seperate_rollout_roles = hasattr(config.worker.rollout, "model")
+        rollout_model_path = config.worker.rollout.model.model_path
+        actor_model_path = config.worker.actor.model.model_path
+        seperate_rollout_roles = rollout_model_path != actor_model_path
         print(f"seperate_rollout_roles: {seperate_rollout_roles}")
         if seperate_rollout_roles:
             role_worker_mapping = {

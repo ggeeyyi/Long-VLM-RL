@@ -113,7 +113,7 @@ class FSDPWorker(Worker):
         if self._has_ref:  # NOTE: it seems that manual offload is slower than FSDP offload
             self._use_ref_param_offload = self.config.ref.offload.offload_params
             
-        if self._has_rollout:
+        if self._has_rollout and not self._skip_rollout_init:
             self._use_param_offload = self.config.rollout.offload.offload_params
             self._use_optimizer_offload = self.config.rollout.offload.offload_optimizer
             self._init_dist_mesh(self.config.rollout, "rollout")
@@ -180,7 +180,6 @@ class FSDPWorker(Worker):
             return
 
         if role != "ref":  # ref model's tokenizer is same as actor
-        # if True:
             self.tokenizer = get_tokenizer(
                 model_config.tokenizer_path,
                 trust_remote_code=model_config.trust_remote_code,
@@ -399,7 +398,7 @@ class FSDPWorker(Worker):
             model_vision_encoder=self.model_vision_encoder,
         )
         self.rollout_sharding_manager = FSDPVLLMShardingManager(
-            module=self.ref_fsdp_module,
+            module=self.fsdp_module,
             inference_engine=self.rollout.inference_engine,
             device_mesh=rollout_device_mesh,
             use_param_offload=self._use_param_offload,
