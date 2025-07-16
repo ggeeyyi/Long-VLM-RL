@@ -89,7 +89,7 @@ class FSDPWorker(Worker):
         self._has_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref", "actor_ref"]
         self._has_critic = self.role == "critic"
         self._has_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
-        self._skip_rollout_init = self.role in ["actor_rollout","actor_rollout_ref"]
+        self._init_rollout = self.role in ["rollout"]   # need to specifically initialize rollout model
         self._has_ref = self.role in ["ref", "actor_rollout_ref", "actor_ref"]
         if self._has_actor and self._has_critic:
             raise ValueError("Actor and critic cannot be both initialized.")
@@ -113,7 +113,7 @@ class FSDPWorker(Worker):
         if self._has_ref:  # NOTE: it seems that manual offload is slower than FSDP offload
             self._use_ref_param_offload = self.config.ref.offload.offload_params
             
-        if self._has_rollout and not self._skip_rollout_init:
+        if self._init_rollout:
             self._use_param_offload = self.config.rollout.offload.offload_params
             self._use_optimizer_offload = self.config.rollout.offload.offload_optimizer
             self._init_dist_mesh(self.config.rollout, "rollout")
@@ -374,10 +374,13 @@ class FSDPWorker(Worker):
                 offload_fsdp_optimizer(optimizer=self.optimizer)
                 print_gpu_memory_usage(f"After offload {role} optimizer during init")
         else:
-            self.ref_fsdp_module = fsdp_module
-            if self._use_ref_param_offload:
-                offload_fsdp_model(self.ref_fsdp_module)
-                print_gpu_memory_usage(f"After offload {role} model during init")
+            if role == "rollout":
+                self.fsdp_module = fsdp_module
+            else: 
+                self.ref_fsdp_module = fsdp_module
+                if self._use_ref_param_offload:
+                    offload_fsdp_model(self.ref_fsdp_module)
+                    print_gpu_memory_usage(f"After offload {role} model during init")
 
     def _build_rollout(self) -> None:
         if self.diffusion:
@@ -436,7 +439,7 @@ class FSDPWorker(Worker):
                 role="ref",
             )
             
-        if self._has_rollout and not self._skip_rollout_init:
+        if self._init_rollout:
             self._build_model_optimizer(
                 model_config=self.config.rollout.model,
                 fsdp_config=self.config.rollout.fsdp,
