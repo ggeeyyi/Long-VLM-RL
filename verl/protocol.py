@@ -646,6 +646,32 @@ class DataProto:
             meta_info=self.meta_info,
         )
 
+    def deepcopy(self) -> "DataProto":
+        """Create a deep copy of the DataProto.
+        
+        This method creates a completely independent copy where modifications 
+        to the copy won't affect the original DataProto.
+        
+        Returns:
+            DataProto: A new DataProto with deep copies of all data components.
+        """
+        # Deep copy the batch (TensorDict)
+        batch_copy = None
+        if self.batch is not None:
+            batch_copy = self.batch.clone()
+        
+        # Deep copy the non_tensor_batch
+        non_tensor_batch_copy = copy.deepcopy(self.non_tensor_batch)
+        
+        # Deep copy the meta_info
+        meta_info_copy = copy.deepcopy(self.meta_info)
+        
+        return DataProto(
+            batch=batch_copy,
+            non_tensor_batch=non_tensor_batch_copy,
+            meta_info=meta_info_copy
+        )
+
 
 @dataclass
 class DataProtoFuture:

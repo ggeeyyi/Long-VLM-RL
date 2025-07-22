@@ -552,11 +552,15 @@ class FSDPWorker(Worker):
         del data.non_tensor_batch["multi_modal_data"]
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def update_actor(self, data: DataProto):
+    def update_actor(self, data: DataProto, rollout_data: DataProto = None):
         assert self._has_actor
 
         self._process_multi_modal_inputs(data)
+        if rollout_data is not None:
+            self._process_multi_modal_inputs(rollout_data)
         data = data.to(torch.cuda.current_device())
+        if rollout_data is not None:
+            rollout_data = rollout_data.to(torch.cuda.current_device())
 
         if self._use_param_offload:
             load_fsdp_model(self.fsdp_module)
@@ -566,8 +570,10 @@ class FSDPWorker(Worker):
 
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data=data)
+            if rollout_data is not None:
+                rollout_data = self.ulysses_sharding_manager.preprocess_data(data=rollout_data)
             with Timer(name="update_policy", logger=None) as timer:
-                metrics = self.actor.update_policy(data=data)
+                metrics = self.actor.update_policy(data=data, rollout_data=rollout_data)
 
             delta_time = timer.last
             if not self.diffusion:

@@ -66,7 +66,7 @@ def create_dataloader(config: DataConfig, tokenizer: PreTrainedTokenizer, proces
         num_workers=config.num_workers,
         collate_fn=collate_fn,
         pin_memory=False,
-        drop_last=True,
+        drop_last=config.drop_last,
     )
 
     val_dataset = RLHFDataset(
@@ -112,3 +112,50 @@ def create_dataloader(config: DataConfig, tokenizer: PreTrainedTokenizer, proces
     print(f"Size of train dataloader: {len(train_dataloader)}")
     print(f"Size of val dataloader: {len(val_dataloader)}")
     return train_dataloader, val_dataloader
+
+def create_rlhf_dataset(config: DataConfig, tokenizer: PreTrainedTokenizer, processor: Optional[ProcessorMixin]) -> None:
+    train_dataset = RLHFDataset(
+        data_path=config.train_files,
+        tokenizer=tokenizer,
+        processor=processor,
+        prompt_key=config.prompt_key,
+        answer_key=config.answer_key,
+        image_key=config.image_key,
+        image_dir=config.image_dir,
+        video_key=config.video_key,
+        video_dir=config.video_dir,
+        cache_dir=config.cache_dir,
+        max_prompt_length=config.max_prompt_length,
+        truncation="right",
+        format_prompt=config.format_prompt,
+        min_pixels=config.min_pixels,
+        max_pixels=config.max_pixels,
+        filter_overlong_prompts=config.filter_overlong_prompts,
+        vila_model=config.vila_model,
+        diffusion=config.diffusion,
+        is_omni=config.is_omni,
+        audio_max_length=config.audio_max_length,
+    )
+    val_dataset = RLHFDataset(
+        data_path=config.val_files,
+        tokenizer=tokenizer,
+        processor=processor,
+        prompt_key=config.prompt_key,
+        answer_key=config.answer_key,
+        image_key=config.image_key,
+        image_dir=config.image_dir,
+        video_key=config.video_key,
+        video_dir=config.video_dir,
+        cache_dir=config.cache_dir,
+        max_prompt_length=config.max_prompt_length,
+        truncation="right",
+        format_prompt=config.format_prompt,
+        min_pixels=config.min_pixels,
+        max_pixels=config.max_pixels,
+        filter_overlong_prompts=config.filter_overlong_prompts,
+        vila_model=config.vila_model,
+        diffusion=config.diffusion,
+        is_omni=config.is_omni,
+        audio_max_length=config.audio_max_length,
+    )
+    return train_dataset, val_dataset

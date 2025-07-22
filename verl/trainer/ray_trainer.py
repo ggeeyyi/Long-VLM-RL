@@ -24,7 +24,9 @@ from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import IntEnum, auto
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional, Type, Union
+from torch.utils.data import Dataset
+from datasets import DatasetDict
 
 import numpy as np
 import ray
@@ -48,7 +50,9 @@ from . import core_algos
 from .config import PPOConfig
 from .core_algos import AdvantageEstimator, FixedKLController, KLController, compute_kl, get_kl_controller
 from .metrics import compute_data_metrics, compute_throughout_metrics, compute_timing_metrics, reduce_metrics
-
+from ..utils.dataset import RLHFDataset
+from tensordict import TensorDict
+from .utils import convert_rollout_batch_to_tensordict
 
 class Role(IntEnum):
     """
@@ -517,10 +521,9 @@ class RayPPOTrainer:
                 # pop those keys for generation
                 gen_batch = new_batch.pop(
                     batch_keys=["input_ids", "attention_mask", "position_ids"],
-                    non_tensor_batch_keys=["raw_prompt_ids", "multi_modal_data"],
+                    non_tensor_batch_keys=["raw_prompt_ids", "multi_modal_data", "rollout_batch"],
                     meta_info_keys=["min_pixels", "max_pixels"],
                 )
-
             # generate a batch
             gen_batch_output = self.actor_rollout_ref_wg.generate_sequences(gen_batch)
 
@@ -588,6 +591,75 @@ class RayPPOTrainer:
 
                 return batch[: self.config.data.rollout_batch_size * self.config.worker.rollout.n]
 
+            return batch
+    
+    def _make_batch_data_rollout_cache(self, dataset) -> DataProto:
+        print("Start generating batch...")
+        gen_batch_output_list = []
+        processed_samples = 0
+        len_dataset = len(dataset)
+        while True:
+            try:
+                batch_dict = next(self.data_iterator)
+            except StopIteration:
+                break
+            meta_info = {"min_pixels": self.config.data.min_pixels, "max_pixels": self.config.data.max_pixels}
+            new_batch: DataProto = DataProto.from_single_dict(batch_dict, meta_info=meta_info)
+
+            gen_batch = new_batch.pop(
+                batch_keys=["input_ids", "attention_mask", "position_ids"],
+                non_tensor_batch_keys=["raw_prompt_ids", "multi_modal_data"],
+                meta_info_keys=["min_pixels", "max_pixels"],
+            )
+            gen_batch_output = self.actor_rollout_ref_wg.generate_sequences(gen_batch)
+            gen_batch_output_list.append(gen_batch_output)
+            processed_samples += len(gen_batch)
+            print(f"processed {processed_samples}/{len_dataset} samples")
+        
+        gen_batch_output = DataProto.concat(gen_batch_output_list)
+        return gen_batch_output
+    
+    def _align_rollout_to_RLHF_dataset(self, rollout_batch: TensorDict, original_dataset: Dataset) -> Dataset:
+        rollout_n = self.config.worker.rollout.n
+        dataset_len = len(original_dataset)
+        expected_cache_len = dataset_len * rollout_n
+        
+        # Verify the rollout_cache length
+        if len(rollout_batch) != expected_cache_len:
+            raise ValueError(
+                f"rollout_cache length ({len(rollout_batch)}) should be {rollout_n} times "
+                f"dataset length ({dataset_len} * {rollout_n} = {expected_cache_len})"
+            )
+        
+        # Split rollout_batch into groups of rollout_n
+        rollout_groups = []
+        for i in range(0, len(rollout_batch), rollout_n):
+            group_dict = {}
+            for key, value in rollout_batch.items():
+                if isinstance(value, torch.Tensor):
+                    # For tensor data, slice the batch dimension
+                    group_dict[key] = value[i:i+rollout_n]
+                elif isinstance(value, (list, tuple, np.ndarray)):
+                    # For list/array data, slice accordingly
+                    group_dict[key] = value[i:i+rollout_n]
+                else:
+                    # For other types, try to slice or just take the value
+                    try:
+                        group_dict[key] = value[i:i+rollout_n]
+                    except (TypeError, IndexError):
+                        # If slicing fails, replicate the value for the group
+                        group_dict[key] = [value] * rollout_n
+            rollout_groups.append(group_dict)
+        
+        # Add the rollout data as a new column to the original dataset
+        def add_rollout_column(example, idx):
+            example['rollout_batch'] = rollout_groups[idx]
+            return example
+        
+        processed_dataset = original_dataset.map(add_rollout_column, with_indices=True)
+        
+        return processed_dataset
+    
     def fit(self):
         """
         The training loop of PPO.
@@ -695,6 +767,216 @@ class RayPPOTrainer:
                 if self.config.trainer.critic_warmup <= self.global_step:
                     with timer("update_actor", timing_raw):
                         actor_output = self.actor_rollout_ref_wg.update_actor(batch)
+
+                    actor_metrics = reduce_metrics(actor_output.non_tensor_batch)
+                    metrics.update(actor_metrics)
+
+                # validate
+                if (
+                    self.val_reward_fn is not None
+                    and self.config.trainer.val_freq > 0
+                    and self.global_step % self.config.trainer.val_freq == 0
+                ):
+                    with timer("validation", timing_raw):
+                        val_metrics = self._validate()
+
+                    metrics.update(val_metrics)
+
+                if self.config.trainer.save_freq > 0 and self.global_step % self.config.trainer.save_freq == 0:
+                    with timer("save_checkpoint", timing_raw):
+                        self._save_checkpoint()
+
+            # collect metrics
+            num_gpus = self.resource_pool_manager.get_num_gpus()
+            metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic, diffusion=self.diffusion))
+            metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw, diffusion=self.diffusion))
+            metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, num_gpus=num_gpus, diffusion=self.diffusion))
+
+            self.logger.log(data=metrics, step=self.global_step)
+            main_tqdm.update()
+
+        # perform validation after training
+        if self.val_reward_fn is not None:
+            if (
+                val_metrics is None
+                or self.config.trainer.val_freq <= 0
+                or self.global_step % self.config.trainer.val_freq != 0
+            ):
+                val_metrics = self._validate()
+                self.logger.log(data=val_metrics, step=self.global_step)
+
+            print(f"Final validation metrics: {convert_dict_to_str(val_metrics)}")
+
+        if self.config.trainer.save_freq <= 0 or self.global_step % self.config.trainer.save_freq != 0:
+            self._save_checkpoint()
+
+    def generate_rollout(self, train_dataset, val_dataset):
+        """
+        Generate and save rollouts from the current model for later distillation training.
+        This version supports multiple processing approaches for dataset items.
+        """
+        print("Generating rollouts for future distillation training...")
+        print("Rollouts will be saved to 'rollout_cache/' directory")
+        
+        self._load_checkpoint()
+
+        print("Processing training dataset...")
+
+        self.actor_rollout_ref_wg.prepare_rollout_engine()
+        self.data_iterator = iter(self.train_dataloader)
+        if not os.path.exists('train.pth'):
+            train_gen_batch_output = self._make_batch_data_rollout_cache(train_dataset)
+            train_gen_batch = train_gen_batch_output.batch
+            torch.save(train_gen_batch,'train.pth')
+        else:
+            train_gen_batch = torch.load('train.pth', weights_only=False)
+        
+        self.data_iterator = iter(self.val_dataloader)
+        if not os.path.exists('val.pth'):
+            val_gen_batch_output = self._make_batch_data_rollout_cache(val_dataset)
+            val_gen_batch = val_gen_batch_output.batch
+            torch.save(val_gen_batch,'val.pth')
+        else:
+            val_gen_batch = torch.load('val.pth', weights_only=False)
+               
+        self.actor_rollout_ref_wg.release_rollout_engine()
+        
+        aligned_train_datset = self._align_rollout_to_RLHF_dataset(train_gen_batch, train_dataset.dataset)
+        aligned_val_datset = self._align_rollout_to_RLHF_dataset(val_gen_batch, val_dataset.dataset)
+        
+        aligned_dataset_dict = DatasetDict({
+            'train': aligned_train_datset,
+            'val': aligned_val_datset
+        })
+        save_path = "aligned_dataset"
+        aligned_dataset_dict.save_to_disk(save_path)
+        aligned_dataset_dict.push_to_hub("GY2233/lmms-ScienceQA-rollout-cache")
+        
+        print("Rollout generation completed!")
+        print("To use these rollouts for distillation training, set config.trainer.use_rollout_cache = True")
+
+    def distilation_fit(self):
+        """
+        Distillation training using cached rollouts from a teacher model.
+        
+        """
+        # GRPO on original fit pipeline and cached rollout from teacher model
+        self.logger = Tracker(loggers=self.config.trainer.logger, config=self.config.to_dict())
+        self.global_step = 0
+        main_tqdm = tqdm(range(self.training_steps), desc="Running step", position=0)
+        val_metrics: Optional[Dict[str, Any]] = None
+        
+        # load checkpoint before doing anything
+        self._load_checkpoint()
+        main_tqdm.update(self.global_step)
+
+        # currently, we only support validation using the reward_function.
+        if self.val_reward_fn is not None and self.config.trainer.val_before_train:
+            val_metrics = self._validate()
+            self.logger.log(data=val_metrics, step=self.global_step)
+            if self.config.trainer.val_only:
+                return
+
+        self.data_iterator = iter(self.train_dataloader)
+        while self.global_step < self.training_steps:
+            self.global_step += 1
+
+            metrics, timing_raw = {}, {}
+            with timer("step", timing_raw):
+                # make a batch of data
+                with timer("gen", timing_raw):
+                    if not self.diffusion:
+                        self.actor_rollout_ref_wg.prepare_rollout_engine()
+                        batch = self._make_batch_data(metrics=metrics)
+                        self.actor_rollout_ref_wg.release_rollout_engine()
+                    else:
+                        batch = self._make_batch_data(metrics=metrics)
+                
+                rollout_batch = batch.deepcopy()
+                rollout_batch.pop(
+                    batch_keys=["prompts", "responses", "attention_mask",
+                                "response_mask", "position_ids", "input_ids"]
+                )
+                batch.pop(batch_keys=["rollout_prompts", "rollout_responses", "rollout_attention_mask", "rollout_response_mask", "rollout_position_ids", "rollout_input_ids"])
+                rollout_batch.rename("rollout_responses", "responses")
+                rollout_batch.rename("rollout_attention_mask", "attention_mask")
+                rollout_batch.rename("rollout_response_mask", "response_mask")
+                rollout_batch.rename("rollout_position_ids", "position_ids")
+                rollout_batch.rename("rollout_input_ids", "input_ids")
+                rollout_batch.rename("rollout_prompts", "prompts")
+                batches = [batch, rollout_batch]
+                
+                for batch in batches:
+                    # balance the number of valid tokens on each dp rank.
+                    # NOTE: this breaks the order of data inside the batch.
+                    # Please take care when you implement group based adv computation such as GRPO and rloo
+                    if not self.diffusion:
+                        self._balance_batch(batch, metrics=metrics)
+                        # compute global valid tokens
+                        batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
+
+                    # compute reward
+                    if not self.diffusion:
+                        if "token_level_scores" not in batch.batch:
+                            with timer("reward", timing_raw):
+                                reward_ref = self.reward_fn.compute_reward.remote(batch)
+                    else:
+                        reward_ref = self.reward_fn.compute_reward.remote(batch)
+                    # recompute old_log_probs
+                    if not self.diffusion:
+                        with timer("old", timing_raw):
+                            old_log_probs = self.actor_rollout_ref_wg.compute_log_probs(batch)
+                            batch = batch.union(old_log_probs)
+
+                    # compute ref_log_probs
+                    if self.use_reference_policy:
+                        with timer("ref", timing_raw):
+                            ref_log_probs = self.actor_rollout_ref_wg.compute_ref_log_probs(batch)
+                            batch = batch.union(ref_log_probs)
+
+                    # compute values
+                    if self.use_critic:
+                        with timer("values", timing_raw):
+                            values = self.critic_wg.compute_values(batch)
+                            batch = batch.union(values)
+
+                    with timer("adv", timing_raw):
+                        if "token_level_scores" not in batch.batch:
+                            # get token level scores asynchronously
+                            reward_tensor, reward_metrics = ray.get(reward_ref)
+                            batch.batch["token_level_scores"] = reward_tensor
+                            reward_metrics = {f"reward/{k}": v for k, v in reduce_metrics(reward_metrics).items()}
+                            metrics.update(reward_metrics)
+
+                        # apply kl penalty if available
+                        if not self.config.algorithm.use_kl_loss and self.use_reference_policy:
+                            # apply kl penalty to reward
+                            batch, kl_metrics = apply_kl_penalty(batch, self.kl_ctrl, self.config.algorithm.kl_penalty)
+                            metrics.update(kl_metrics)
+                        else:
+                            batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+
+                        # compute advantages, executed on the driver process
+                        compute_advantage_func = compute_advantage_diffusion if self.diffusion else compute_advantage
+                        batch = compute_advantage_func(
+                            batch,
+                            adv_estimator=self.config.algorithm.adv_estimator,
+                            gamma=self.config.algorithm.gamma,
+                            lam=self.config.algorithm.lam,
+                        )
+
+                # update critic
+                if self.use_critic:
+                    with timer("update_critic", timing_raw):
+                        critic_output = self.critic_wg.update_critic(batch)
+
+                    critic_metrics = reduce_metrics(critic_output.non_tensor_batch)
+                    metrics.update(critic_metrics)
+
+                # update actor
+                if self.config.trainer.critic_warmup <= self.global_step:
+                    with timer("update_actor", timing_raw):
+                        actor_output = self.actor_rollout_ref_wg.update_actor(batch, rollout_data=rollout_batch)
 
                     actor_metrics = reduce_metrics(actor_output.non_tensor_batch)
                     metrics.update(actor_metrics)

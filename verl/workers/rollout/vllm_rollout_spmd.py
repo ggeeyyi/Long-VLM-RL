@@ -328,7 +328,7 @@ class vLLMRollout(BaseRollout):
             response_ids=response_ids, eos_token_id=eos_token_id, dtype=attention_mask.dtype
         )
         attention_mask = torch.cat((attention_mask, response_mask), dim=-1)
-
+        rollout_batch = self.process_rollout_batch(prompts.non_tensor_batch["rollout_batch"])
         # all the tp ranks should contain the same data here. data in all ranks are valid
         batch = TensorDict(
             {
@@ -338,6 +338,12 @@ class vLLMRollout(BaseRollout):
                 "attention_mask": attention_mask,
                 "response_mask": response_mask,
                 "position_ids": position_ids,
+                "rollout_responses": rollout_batch["responses"],
+                "rollout_attention_mask": rollout_batch["attention_mask"],
+                "rollout_response_mask": rollout_batch["response_mask"],
+                "rollout_position_ids": rollout_batch["position_ids"],
+                "rollout_input_ids": rollout_batch["input_ids"],
+                "rollout_prompts": rollout_batch["prompts"],
             },
             batch_size=batch_size,
         )
@@ -352,3 +358,17 @@ class vLLMRollout(BaseRollout):
         prompts.meta_info["num_repeat"] = self.sampling_params.n
         prompts.meta_info["num_chunk_seq"] = self.num_chunk_seq
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch, meta_info=prompts.meta_info)
+
+    def process_rollout_batch(self, rollout_batch: TensorDict) -> TensorDict:
+        batch_size = len(rollout_batch)
+        
+        rollout_response_ids = torch.cat([torch.tensor(rollout_batch[i]["responses"]) for i in range(batch_size)], dim=0)  # (rollout_n*batch_size, response_length)
+        rollout_attention_mask = torch.cat([torch.tensor(rollout_batch[i]["attention_mask"]) for i in range(batch_size)], dim=0)  # (rollout_n*batch_size, response_length + prompt_length)
+        rollout_response_mask = torch.cat([torch.tensor(rollout_batch[i]["response_mask"]) for i in range(batch_size)], dim=0)  # (rollout_n*batch_size, response_length)
+        rollout_position_ids = torch.cat([torch.tensor(rollout_batch[i]["position_ids"]) for i in range(batch_size)], dim=0)  # (rollout_n*batch_size, response_length + prompt_length)
+        rollout_input_ids = torch.cat([torch.tensor(rollout_batch[i]["input_ids"]) for i in range(batch_size)], dim=0)  # (rollout_n*batch_size, response_length + prompt_length) 
+        rollout_prompts = torch.cat([torch.tensor(rollout_batch[i]["prompts"]) for i in range(batch_size)], dim=0)  # (rollout_n*batch_size, prompt_length)
+        rollout_batch = TensorDict(
+            {"responses": rollout_response_ids, "attention_mask": rollout_attention_mask, "response_mask": rollout_response_mask, "position_ids": rollout_position_ids, "input_ids": rollout_input_ids, "prompts": rollout_prompts}
+        )
+        return rollout_batch

@@ -60,6 +60,7 @@ class DataConfig:
     is_omni: bool = False
     audio_max_length: int = 10000
     num_workers: int = 8
+    drop_last: bool = True
 
     def post_init(self):
         if self.image_dir is not None:
@@ -107,6 +108,8 @@ class AlgorithmConfig:
     """filter out low reward samples if online filtering"""
     filter_high: float = 0.99
     """filter out high reward samples if online filtering"""
+    reward_fusion_weight: float = 0.5
+    """weight for combining cached rollout rewards with current rewards in distillation training"""
 
 
 @dataclass
@@ -149,6 +152,10 @@ class TrainerConfig:
     """load checkpoint path"""
     diffusion: bool = False
     """whether to use diffusion trainer"""
+    generate_rollout: bool = False
+    """whether to generate and save rollouts to disk for later distillation training"""
+    use_rollout_cache: bool = False
+    """whether to use cached rollouts for distillation training"""
 
     def post_init(self):
         if self.save_checkpoint_path is None:

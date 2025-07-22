@@ -517,7 +517,7 @@ class DataParallelPPOActor(BasePPOActor):
         prev_sample_mean = torch.concat(prev_sample_mean_lst, dim=0)
         return log_probs, prev_sample_mean
 
-    def update_policy(self, data: DataProto) -> Dict[str, Any]:
+    def update_policy(self, data: DataProto, rollout_data: DataProto = None) -> Dict[str, Any]:
         self.actor_module.train()
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid slient error
@@ -528,21 +528,23 @@ class DataParallelPPOActor(BasePPOActor):
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
         mini_batches = data.select(select_keys, non_tensor_select_keys).split(self.config.global_batch_size_per_device)
-
+        mini_batches_rollout = rollout_data.select(select_keys, non_tensor_select_keys).split(self.config.global_batch_size_per_device)
+        
         metrics = defaultdict(list)
         for _ in range(self.config.ppo_epochs):
             if self.rank == 0:
                 mini_batches = tqdm(mini_batches, desc="Train mini-batches", position=1)
 
-            for mini_batch in mini_batches:
+            for (mini_batch, mini_batch_rollout) in zip(mini_batches, mini_batches_rollout):
                 gradient_accumulation = (
                     self.config.global_batch_size_per_device // self.config.micro_batch_size_per_device_for_update
                 )
                 micro_batches = mini_batch.split(self.config.micro_batch_size_per_device_for_update)
+                micro_batches_rollout = mini_batch_rollout.split(self.config.micro_batch_size_per_device_for_update)
                 if self.rank == 0:
                     micro_batches = tqdm(micro_batches, desc="Update policy", position=2)
 
-                for micro_batch in micro_batches:
+                for (micro_batch, micro_batch_rollout) in zip(micro_batches, micro_batches_rollout):
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
                     responses = model_inputs["responses"]
                     response_length = responses.size(1)
@@ -550,9 +552,18 @@ class DataParallelPPOActor(BasePPOActor):
                     response_mask = attention_mask[:, -response_length:]
                     old_log_probs = model_inputs["old_log_probs"]
                     advantages = model_inputs["advantages"]
+                    
+                    model_inputs_rollout = {**micro_batch_rollout.batch, **micro_batch_rollout.non_tensor_batch}
+                    responses_rollout = model_inputs_rollout["responses"]
+                    response_length_rollout = responses_rollout.size(1)
+                    attention_mask_rollout = model_inputs_rollout["attention_mask"]
+                    response_mask_rollout = attention_mask_rollout[:, -response_length_rollout:]
+                    old_log_probs_rollout = model_inputs_rollout["old_log_probs"]
+                    advantages_rollout = model_inputs_rollout["advantages"]
 
                     # all return: (bsz, response_length)
                     log_probs = self._forward_micro_batch(model_inputs, temperature=temperature)
+                    log_probs_rollout = self._forward_micro_batch(model_inputs_rollout, temperature=temperature)
 
                     pg_loss, pg_metrics = compute_policy_loss(
                         old_log_probs=old_log_probs,
@@ -564,20 +575,41 @@ class DataParallelPPOActor(BasePPOActor):
                         clip_ratio_dual=self.config.clip_ratio_dual,
                         loss_avg_mode=self.config.loss_avg_mode,
                     )
+                    pg_loss_rollout, pg_metrics_rollout = compute_policy_loss(
+                        old_log_probs=old_log_probs_rollout,
+                        log_probs=log_probs_rollout,
+                        advantages=advantages_rollout,
+                        response_mask=response_mask_rollout,
+                        clip_ratio_low=self.config.clip_ratio_low,
+                        clip_ratio_high=self.config.clip_ratio_high,
+                        clip_ratio_dual=self.config.clip_ratio_dual,
+                        loss_avg_mode=self.config.loss_avg_mode,
+                    )
                     if self.config.use_kl_loss and "ref_log_probs" in model_inputs:
                         ref_log_probs = model_inputs["ref_log_probs"]
+                        ref_log_probs_rollout = model_inputs_rollout["ref_log_probs"]
                         # compute kl loss
                         kld = compute_kl(
                             log_probs=log_probs,
                             ref_log_probs=ref_log_probs,
                             kl_penalty=self.config.kl_penalty,
                         )
+                        kld_rollout = compute_kl(
+                            log_probs=log_probs_rollout,
+                            ref_log_probs=ref_log_probs_rollout,
+                            kl_penalty=self.config.kl_penalty,
+                        )
                         kl_loss = average_loss(kld, response_mask, mode=self.config.loss_avg_mode)
+                        kl_loss_rollout = average_loss(kld_rollout, response_mask_rollout, mode=self.config.loss_avg_mode)
                         pg_loss = pg_loss + kl_loss * self.config.kl_coef
+                        pg_loss_rollout = pg_loss_rollout + kl_loss_rollout * self.config.kl_coef
                         metrics["actor/kl_loss"] = kl_loss.detach().item()
                         metrics["actor/kl_coef"] = self.config.kl_coef
+                        metrics["actor/kl_loss_rollout"] = kl_loss_rollout.detach().item()
+                        metrics["actor/kl_coef_rollout"] = self.config.kl_coef
 
-                    loss = pg_loss / gradient_accumulation
+                    loss = 0.5 * (pg_loss / gradient_accumulation + pg_loss_rollout / gradient_accumulation)
+                    
                     loss.backward()
 
                     batch_metrics = {

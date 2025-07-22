@@ -129,3 +129,10 @@ outputs
 ffmpeg-4.1
 test_scripts
 trashcan
+
+*.json
+*.arrow
+*.pth
+*.sh
+*.yaml
+*.pkl
