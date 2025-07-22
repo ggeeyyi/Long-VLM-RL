@@ -328,7 +328,10 @@ class vLLMRollout(BaseRollout):
             response_ids=response_ids, eos_token_id=eos_token_id, dtype=attention_mask.dtype
         )
         attention_mask = torch.cat((attention_mask, response_mask), dim=-1)
-        rollout_batch = self.process_rollout_batch(prompts.non_tensor_batch["rollout_batch"])
+        if "rollout_batch" in prompts.non_tensor_batch:
+            rollout_batch = self.process_rollout_batch(prompts.non_tensor_batch["rollout_batch"])
+        else:
+            rollout_batch = None
         # all the tp ranks should contain the same data here. data in all ranks are valid
         batch = TensorDict(
             {
@@ -338,15 +341,12 @@ class vLLMRollout(BaseRollout):
                 "attention_mask": attention_mask,
                 "response_mask": response_mask,
                 "position_ids": position_ids,
-                "rollout_responses": rollout_batch["responses"],
-                "rollout_attention_mask": rollout_batch["attention_mask"],
-                "rollout_response_mask": rollout_batch["response_mask"],
-                "rollout_position_ids": rollout_batch["position_ids"],
-                "rollout_input_ids": rollout_batch["input_ids"],
-                "rollout_prompts": rollout_batch["prompts"],
             },
             batch_size=batch_size,
         )
+        if rollout_batch is not None:
+            batch.update(rollout_batch)
+        
         if batch_multi_modal_data is not None:
             non_tensor_batch = {"multi_modal_data": batch_multi_modal_data}
             if len(batch_multi_modal_embeds) > 0:
@@ -369,6 +369,6 @@ class vLLMRollout(BaseRollout):
         rollout_input_ids = torch.cat([torch.tensor(rollout_batch[i]["input_ids"]) for i in range(batch_size)], dim=0)  # (rollout_n*batch_size, response_length + prompt_length) 
         rollout_prompts = torch.cat([torch.tensor(rollout_batch[i]["prompts"]) for i in range(batch_size)], dim=0)  # (rollout_n*batch_size, prompt_length)
         rollout_batch = TensorDict(
-            {"responses": rollout_response_ids, "attention_mask": rollout_attention_mask, "response_mask": rollout_response_mask, "position_ids": rollout_position_ids, "input_ids": rollout_input_ids, "prompts": rollout_prompts}
+            {"rollout_responses": rollout_response_ids, "rollout_attention_mask": rollout_attention_mask, "rollout_response_mask": rollout_response_mask, "rollout_position_ids": rollout_position_ids, "rollout_input_ids": rollout_input_ids, "rollout_prompts": rollout_prompts}
         )
         return rollout_batch

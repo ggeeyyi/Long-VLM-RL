@@ -986,7 +986,7 @@ class RayPPOTrainer:
                 # update actor
                 if self.config.trainer.critic_warmup <= self.global_step:
                     with timer("update_actor", timing_raw):
-                        actor_output = self.actor_rollout_ref_wg.update_actor(batch, rollout_data=rollout_batch, rollout_weight=self.config.rollout.rollout_weight)
+                        actor_output = self.actor_rollout_ref_wg.update_actor(batch, rollout_data=rollout_batch)
 
                     actor_metrics = reduce_metrics(actor_output.non_tensor_batch)
                     metrics.update(actor_metrics)

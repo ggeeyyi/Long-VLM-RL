@@ -67,7 +67,6 @@ class RolloutConfig:
     offload: OffloadConfig = field(default_factory=OffloadConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     num_chunk_seq: int = 1
-    rollout_weight: float = 0.0
 
     def to_dict(self):
         return asdict(self)

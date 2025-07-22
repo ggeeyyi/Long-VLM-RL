@@ -156,7 +156,8 @@ class TrainerConfig:
     """whether to generate and save rollouts to disk for later distillation training"""
     use_rollout_cache: bool = False
     """whether to use cached rollouts for distillation training"""
-
+    rollout_weight: float = 0.0
+    """weight for rollout loss"""
     def post_init(self):
         if self.save_checkpoint_path is None:
             self.save_checkpoint_path = os.path.join("checkpoints", self.project_name, self.experiment_name)

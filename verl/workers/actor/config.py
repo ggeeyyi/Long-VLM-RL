@@ -113,6 +113,7 @@ class ActorConfig:
     diffusion: bool = False
     guidance_scale: float = 4.5
     scheduler: str = ""
+    rollout_weight: float = 0.0
 
 
 @dataclass

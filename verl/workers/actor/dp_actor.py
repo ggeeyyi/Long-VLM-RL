@@ -410,24 +410,6 @@ class DataParallelPPOActor(BasePPOActor):
 
         return log_probs
 
-    def _forward_micro_batch_diffusion(self, micro_batch: Dict[str, torch.Tensor], temperature: float) -> torch.Tensor:
-        """
-        Returns:
-            log_probs: # (bs, response_len)
-        """
-        # print("***micro_batch***", micro_batch)
-        prev_sample, log_prob, prev_sample_mean, std_dev_t = compute_log_prob_flow_grpo(self.actor_module,
-                                                                                        self.scheduler,
-                                                                                        micro_batch,
-                                                                                        0,
-                                                                                        micro_batch["prompt_embeds"],
-                                                                                        micro_batch["pooled_prompt_embeds"] if "pooled_prompt_embeds" in micro_batch else None,
-                                                                                        micro_batch["negative_prompt_embeds"] if "negative_prompt_embeds" in micro_batch else None,
-                                                                                        micro_batch["negative_pooled_prompt_embeds"] if "negative_pooled_prompt_embeds" in micro_batch else None,
-                                                                                        self.config)
-
-        return log_prob, prev_sample_mean
-
     def _optimizer_step(self) -> torch.Tensor:
         if isinstance(self.actor_module, FSDP):
             grad_norm = self.actor_module.clip_grad_norm_(self.config.max_grad_norm)
@@ -517,7 +499,7 @@ class DataParallelPPOActor(BasePPOActor):
         prev_sample_mean = torch.concat(prev_sample_mean_lst, dim=0)
         return log_probs, prev_sample_mean
 
-    def update_policy(self, data: DataProto, rollout_data: DataProto = None, rollout_weight: float = 0.0) -> Dict[str, Any]:
+    def update_policy(self, data: DataProto, rollout_data: DataProto = None) -> Dict[str, Any]:
         self.actor_module.train()
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid slient error
@@ -529,7 +511,7 @@ class DataParallelPPOActor(BasePPOActor):
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
         mini_batches = data.select(select_keys, non_tensor_select_keys).split(self.config.global_batch_size_per_device)
         mini_batches_rollout = rollout_data.select(select_keys, non_tensor_select_keys).split(self.config.global_batch_size_per_device)
-        
+        rollout_weight = self.config.rollout_weight
         metrics = defaultdict(list)
         for _ in range(self.config.ppo_epochs):
             if self.rank == 0:

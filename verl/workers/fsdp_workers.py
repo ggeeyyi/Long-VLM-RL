@@ -552,7 +552,7 @@ class FSDPWorker(Worker):
         del data.non_tensor_batch["multi_modal_data"]
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
-    def update_actor(self, data: DataProto, rollout_data: DataProto = None, rollout_weight: float = 0.0):
+    def update_actor(self, data: DataProto, rollout_data: DataProto = None):
         assert self._has_actor
 
         self._process_multi_modal_inputs(data)
@@ -573,7 +573,7 @@ class FSDPWorker(Worker):
             if rollout_data is not None:
                 rollout_data = self.ulysses_sharding_manager.preprocess_data(data=rollout_data)
             with Timer(name="update_policy", logger=None) as timer:
-                metrics = self.actor.update_policy(data=data, rollout_data=rollout_data, rollout_weight=rollout_weight)
+                metrics = self.actor.update_policy(data=data, rollout_data=rollout_data)
 
             delta_time = timer.last
             if not self.diffusion:
