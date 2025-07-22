@@ -517,7 +517,7 @@ class DataParallelPPOActor(BasePPOActor):
         prev_sample_mean = torch.concat(prev_sample_mean_lst, dim=0)
         return log_probs, prev_sample_mean
 
-    def update_policy(self, data: DataProto, rollout_data: DataProto = None) -> Dict[str, Any]:
+    def update_policy(self, data: DataProto, rollout_data: DataProto = None, rollout_weight: float = 0.0) -> Dict[str, Any]:
         self.actor_module.train()
 
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid slient error
@@ -608,7 +608,7 @@ class DataParallelPPOActor(BasePPOActor):
                         metrics["actor/kl_loss_rollout"] = kl_loss_rollout.detach().item()
                         metrics["actor/kl_coef_rollout"] = self.config.kl_coef
 
-                    loss = 0.5 * (pg_loss / gradient_accumulation + pg_loss_rollout / gradient_accumulation)
+                    loss = (1 - rollout_weight) * pg_loss / gradient_accumulation + rollout_weight * pg_loss_rollout / gradient_accumulation
                     
                     loss.backward()
 
@@ -618,6 +618,11 @@ class DataParallelPPOActor(BasePPOActor):
                         "actor/pg_clipfrac_lower": pg_metrics["pg_clipfrac_lower"],
                         "actor/entropy_loss": pg_metrics["entropy_loss"],
                         "actor/ppo_kl": pg_metrics["ppo_kl"],
+                        "actor/pg_loss_rollout": pg_loss_rollout.detach().item(),
+                        "actor/pg_clipfrac_higher_rollout": pg_metrics_rollout["pg_clipfrac_higher"],
+                        "actor/pg_clipfrac_lower_rollout": pg_metrics_rollout["pg_clipfrac_lower"],
+                        "actor/entropy_loss_rollout": pg_metrics_rollout["entropy_loss"],
+                        "actor/ppo_kl_rollout": pg_metrics_rollout["ppo_kl"],
                     }
                     append_to_dict(metrics, batch_metrics)
 

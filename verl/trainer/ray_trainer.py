@@ -24,7 +24,7 @@ from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import IntEnum, auto
-from typing import Any, Dict, List, Optional, Type, Union
+from typing import Any, Dict, List, Optional, Type, Union, Tuple
 from torch.utils.data import Dataset
 from datasets import DatasetDict
 
@@ -619,6 +619,24 @@ class RayPPOTrainer:
         gen_batch_output = DataProto.concat(gen_batch_output_list)
         return gen_batch_output
     
+    def _post_process_union_batch(self, batch: DataProto) -> Tuple[DataProto, DataProto]:
+        try:
+            rollout_batch = batch.deepcopy()
+            rollout_batch.pop(
+                batch_keys=["prompts", "responses", "attention_mask",
+                            "response_mask", "position_ids", "input_ids"]
+            )
+            batch.pop(batch_keys=["rollout_prompts", "rollout_responses", "rollout_attention_mask", "rollout_response_mask", "rollout_position_ids", "rollout_input_ids"])
+            rollout_batch.rename("rollout_responses", "responses")
+            rollout_batch.rename("rollout_attention_mask", "attention_mask")
+            rollout_batch.rename("rollout_response_mask", "response_mask")
+            rollout_batch.rename("rollout_position_ids", "position_ids")
+            rollout_batch.rename("rollout_input_ids", "input_ids")
+            rollout_batch.rename("rollout_prompts", "prompts")
+        except Exception as e:
+            raise ValueError(f"Failed to post process union batch: {e}")
+        return batch, rollout_batch
+    
     def _align_rollout_to_RLHF_dataset(self, rollout_batch: TensorDict, original_dataset: Dataset) -> Dataset:
         rollout_n = self.config.worker.rollout.n
         dataset_len = len(original_dataset)
@@ -649,8 +667,10 @@ class RayPPOTrainer:
                     except (TypeError, IndexError):
                         # If slicing fails, replicate the value for the group
                         group_dict[key] = [value] * rollout_n
+                        raise Warning(f"Slicing failed for key {key} with value {value}")
+                    
             rollout_groups.append(group_dict)
-        
+
         # Add the rollout data as a new column to the original dataset
         def add_rollout_column(example, idx):
             example['rollout_batch'] = rollout_groups[idx]
@@ -824,20 +844,21 @@ class RayPPOTrainer:
 
         self.actor_rollout_ref_wg.prepare_rollout_engine()
         self.data_iterator = iter(self.train_dataloader)
-        if not os.path.exists('train.pth'):
+        dataset_path = 'rollout_cache'
+        if not os.path.exists(os.path.join(dataset_path, 'train.pth')):
             train_gen_batch_output = self._make_batch_data_rollout_cache(train_dataset)
             train_gen_batch = train_gen_batch_output.batch
-            torch.save(train_gen_batch,'train.pth')
+            torch.save(train_gen_batch, os.path.join(dataset_path, 'train.pth'))
         else:
-            train_gen_batch = torch.load('train.pth', weights_only=False)
+            train_gen_batch = torch.load(os.path.join(dataset_path, 'train.pth'), weights_only=False)
         
         self.data_iterator = iter(self.val_dataloader)
-        if not os.path.exists('val.pth'):
+        if not os.path.exists(os.path.join(dataset_path, 'val.pth')):
             val_gen_batch_output = self._make_batch_data_rollout_cache(val_dataset)
             val_gen_batch = val_gen_batch_output.batch
-            torch.save(val_gen_batch,'val.pth')
+            torch.save(val_gen_batch, os.path.join(dataset_path, 'val.pth'))
         else:
-            val_gen_batch = torch.load('val.pth', weights_only=False)
+            val_gen_batch = torch.load(os.path.join(dataset_path, 'val.pth'), weights_only=False)
                
         self.actor_rollout_ref_wg.release_rollout_engine()
         
@@ -892,18 +913,7 @@ class RayPPOTrainer:
                     else:
                         batch = self._make_batch_data(metrics=metrics)
                 
-                rollout_batch = batch.deepcopy()
-                rollout_batch.pop(
-                    batch_keys=["prompts", "responses", "attention_mask",
-                                "response_mask", "position_ids", "input_ids"]
-                )
-                batch.pop(batch_keys=["rollout_prompts", "rollout_responses", "rollout_attention_mask", "rollout_response_mask", "rollout_position_ids", "rollout_input_ids"])
-                rollout_batch.rename("rollout_responses", "responses")
-                rollout_batch.rename("rollout_attention_mask", "attention_mask")
-                rollout_batch.rename("rollout_response_mask", "response_mask")
-                rollout_batch.rename("rollout_position_ids", "position_ids")
-                rollout_batch.rename("rollout_input_ids", "input_ids")
-                rollout_batch.rename("rollout_prompts", "prompts")
+                batch, rollout_batch = self._post_process_union_batch(batch)
                 batches = [batch, rollout_batch]
                 
                 for batch in batches:
@@ -976,7 +986,7 @@ class RayPPOTrainer:
                 # update actor
                 if self.config.trainer.critic_warmup <= self.global_step:
                     with timer("update_actor", timing_raw):
-                        actor_output = self.actor_rollout_ref_wg.update_actor(batch, rollout_data=rollout_batch)
+                        actor_output = self.actor_rollout_ref_wg.update_actor(batch, rollout_data=rollout_batch, rollout_weight=self.config.rollout.rollout_weight)
 
                     actor_metrics = reduce_metrics(actor_output.non_tensor_batch)
                     metrics.update(actor_metrics)
