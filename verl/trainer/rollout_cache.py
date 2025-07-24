@@ -79,9 +79,8 @@ class Runner:
         reward_fn = RemoteRewardManager.remote(config.worker.reward, tokenizer)
         val_reward_fn = RemoteRewardManager.remote(config.worker.reward, tokenizer)
         
-        config.data.shuffle = False
-        
         if config.trainer.generate_rollout:
+            config.data.shuffle = False
             train_dataset, val_dataset = create_rlhf_dataset(config.data, tokenizer, processor)
             config.data.drop_last = False
         

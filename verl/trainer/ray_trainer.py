@@ -500,7 +500,7 @@ class RayPPOTrainer:
         )
         metrics.update(global_balance_stats)
 
-    def _make_batch_data(self, metrics: Dict[str, Any]) -> DataProto:
+    def _make_batch_data(self, metrics: Dict[str, Any], get_rollout_batch: bool = False) -> DataProto:
         batch = None
         all_metrics = defaultdict(list)
         num_try_make_batch = 0
@@ -519,11 +519,18 @@ class RayPPOTrainer:
                 gen_batch = new_batch.pop(batch_keys=["prompt_embeds", "pooled_prompt_embeds", "negative_prompt_embeds", "negative_pooled_prompt_embeds"])
             else:
                 # pop those keys for generation
-                gen_batch = new_batch.pop(
-                    batch_keys=["input_ids", "attention_mask", "position_ids"],
-                    non_tensor_batch_keys=["raw_prompt_ids", "multi_modal_data", "rollout_batch"],
-                    meta_info_keys=["min_pixels", "max_pixels"],
-                )
+                if get_rollout_batch:
+                    gen_batch = new_batch.pop(
+                        batch_keys=["input_ids", "attention_mask", "position_ids"],
+                        non_tensor_batch_keys=["raw_prompt_ids", "multi_modal_data", "rollout_batch"],
+                        meta_info_keys=["min_pixels", "max_pixels"],
+                    )
+                else:
+                    gen_batch = new_batch.pop(
+                        batch_keys=["input_ids", "attention_mask", "position_ids"],
+                        non_tensor_batch_keys=["raw_prompt_ids", "multi_modal_data"],
+                        meta_info_keys=["min_pixels", "max_pixels"],
+                    )
             # generate a batch
             gen_batch_output = self.actor_rollout_ref_wg.generate_sequences(gen_batch)
 
@@ -876,6 +883,61 @@ class RayPPOTrainer:
         print("Rollout generation completed!")
         print("To use these rollouts for distillation training, set config.trainer.use_rollout_cache = True")
 
+    def calculate_advantage(self, batch: DataProto, metrics: Dict[str, Any], timing_raw: Dict[str, Any]) -> Tuple[DataProto, Dict[str, Any], Dict[str, Any]]: 
+        """
+        Calculate advantages for the batch.
+        """
+        if not self.diffusion:
+            if "token_level_scores" not in batch.batch:
+                with timer("reward", timing_raw):
+                    reward_ref = self.reward_fn.compute_reward.remote(batch)
+        else:
+            reward_ref = self.reward_fn.compute_reward.remote(batch)
+            
+        # recompute old_log_probs
+        if not self.diffusion:
+            with timer("old", timing_raw):
+                old_log_probs = self.actor_rollout_ref_wg.compute_log_probs(batch)
+                batch = batch.union(old_log_probs)
+
+        # compute ref_log_probs
+        if self.use_reference_policy:
+            with timer("ref", timing_raw):
+                ref_log_probs = self.actor_rollout_ref_wg.compute_ref_log_probs(batch)
+                batch = batch.union(ref_log_probs)
+
+        # compute values
+        if self.use_critic:
+            with timer("values", timing_raw):
+                values = self.critic_wg.compute_values(batch)
+                batch = batch.union(values)
+
+        with timer("adv", timing_raw):
+            if "token_level_scores" not in batch.batch:
+                # get token level scores asynchronously
+                reward_tensor, reward_metrics = ray.get(reward_ref)
+                batch.batch["token_level_scores"] = reward_tensor
+                reward_metrics = {f"reward/{k}": v for k, v in reduce_metrics(reward_metrics).items()}
+                metrics.update(reward_metrics)
+
+            # apply kl penalty if available
+            if not self.config.algorithm.use_kl_loss and self.use_reference_policy:
+                # apply kl penalty to reward
+                batch, kl_metrics = apply_kl_penalty(batch, self.kl_ctrl, self.config.algorithm.kl_penalty)
+                metrics.update(kl_metrics)
+            else:
+                batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+
+            # compute advantages, executed on the driver process
+            compute_advantage_func = compute_advantage_diffusion if self.diffusion else compute_advantage
+            batch = compute_advantage_func(
+                batch,
+                adv_estimator=self.config.algorithm.adv_estimator,
+                gamma=self.config.algorithm.gamma,
+                lam=self.config.algorithm.lam,
+            )
+        return batch, metrics, timing_raw
+
     def distilation_fit(self):
         """
         Distillation training using cached rollouts from a teacher model.
@@ -908,72 +970,23 @@ class RayPPOTrainer:
                 with timer("gen", timing_raw):
                     if not self.diffusion:
                         self.actor_rollout_ref_wg.prepare_rollout_engine()
-                        batch = self._make_batch_data(metrics=metrics)
+                        batch = self._make_batch_data(metrics=metrics, get_rollout_batch=True)
                         self.actor_rollout_ref_wg.release_rollout_engine()
                     else:
-                        batch = self._make_batch_data(metrics=metrics)
+                        batch = self._make_batch_data(metrics=metrics, get_rollout_batch=True)
+                
+                if not self.diffusion:
+                    self._balance_batch(batch, metrics=metrics)
+                    # compute global valid tokens
+                    batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()             
                 
                 batch, rollout_batch = self._post_process_union_batch(batch)
-                batches = [batch, rollout_batch]
                 
-                for batch in batches:
-                    # balance the number of valid tokens on each dp rank.
-                    # NOTE: this breaks the order of data inside the batch.
-                    # Please take care when you implement group based adv computation such as GRPO and rloo
-                    if not self.diffusion:
-                        self._balance_batch(batch, metrics=metrics)
-                        # compute global valid tokens
-                        batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
-
-                    # compute reward
-                    if not self.diffusion:
-                        if "token_level_scores" not in batch.batch:
-                            with timer("reward", timing_raw):
-                                reward_ref = self.reward_fn.compute_reward.remote(batch)
-                    else:
-                        reward_ref = self.reward_fn.compute_reward.remote(batch)
-                    # recompute old_log_probs
-                    if not self.diffusion:
-                        with timer("old", timing_raw):
-                            old_log_probs = self.actor_rollout_ref_wg.compute_log_probs(batch)
-                            batch = batch.union(old_log_probs)
-
-                    # compute ref_log_probs
-                    if self.use_reference_policy:
-                        with timer("ref", timing_raw):
-                            ref_log_probs = self.actor_rollout_ref_wg.compute_ref_log_probs(batch)
-                            batch = batch.union(ref_log_probs)
-
-                    # compute values
-                    if self.use_critic:
-                        with timer("values", timing_raw):
-                            values = self.critic_wg.compute_values(batch)
-                            batch = batch.union(values)
-
-                    with timer("adv", timing_raw):
-                        if "token_level_scores" not in batch.batch:
-                            # get token level scores asynchronously
-                            reward_tensor, reward_metrics = ray.get(reward_ref)
-                            batch.batch["token_level_scores"] = reward_tensor
-                            reward_metrics = {f"reward/{k}": v for k, v in reduce_metrics(reward_metrics).items()}
-                            metrics.update(reward_metrics)
-
-                        # apply kl penalty if available
-                        if not self.config.algorithm.use_kl_loss and self.use_reference_policy:
-                            # apply kl penalty to reward
-                            batch, kl_metrics = apply_kl_penalty(batch, self.kl_ctrl, self.config.algorithm.kl_penalty)
-                            metrics.update(kl_metrics)
-                        else:
-                            batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
-
-                        # compute advantages, executed on the driver process
-                        compute_advantage_func = compute_advantage_diffusion if self.diffusion else compute_advantage
-                        batch = compute_advantage_func(
-                            batch,
-                            adv_estimator=self.config.algorithm.adv_estimator,
-                            gamma=self.config.algorithm.gamma,
-                            lam=self.config.algorithm.lam,
-                        )
+                rollout_metric = metrics.copy()
+                rollout_timing_raw = timing_raw.copy()
+                
+                batch, metrics, timing_raw = self.calculate_advantage(batch, metrics, timing_raw)
+                rollout_batch, rollout_metric, rollout_timing_raw = self.calculate_advantage(rollout_batch, rollout_metric, rollout_timing_raw)
 
                 # update critic
                 if self.use_critic:

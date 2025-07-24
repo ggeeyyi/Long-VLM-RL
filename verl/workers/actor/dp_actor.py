@@ -510,8 +510,13 @@ class DataParallelPPOActor(BasePPOActor):
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
         mini_batches = data.select(select_keys, non_tensor_select_keys).split(self.config.global_batch_size_per_device)
-        mini_batches_rollout = rollout_data.select(select_keys, non_tensor_select_keys).split(self.config.global_batch_size_per_device)
-        rollout_weight = self.config.rollout_weight
+        if rollout_data is not None:
+            mini_batches_rollout = rollout_data.select(select_keys, non_tensor_select_keys).split(self.config.global_batch_size_per_device)
+            rollout_weight = self.config.rollout_weight
+        else:
+            mini_batches_rollout = [None] * len(mini_batches)
+            rollout_weight = 0.0
+        
         metrics = defaultdict(list)
         for _ in range(self.config.ppo_epochs):
             if self.rank == 0:
@@ -522,7 +527,13 @@ class DataParallelPPOActor(BasePPOActor):
                     self.config.global_batch_size_per_device // self.config.micro_batch_size_per_device_for_update
                 )
                 micro_batches = mini_batch.split(self.config.micro_batch_size_per_device_for_update)
-                micro_batches_rollout = mini_batch_rollout.split(self.config.micro_batch_size_per_device_for_update)
+                micro_batches_list = [micro_batches]
+                if mini_batch_rollout is not None:
+                    micro_batches_rollout = mini_batch_rollout.split(self.config.micro_batch_size_per_device_for_update)
+                    micro_batches_list.append(micro_batches_rollout)
+                else:
+                    micro_batches_rollout = [None] * len(micro_batches)
+
                 if self.rank == 0:
                     micro_batches = tqdm(micro_batches, desc="Update policy", position=2)
 
@@ -534,18 +545,9 @@ class DataParallelPPOActor(BasePPOActor):
                     response_mask = attention_mask[:, -response_length:]
                     old_log_probs = model_inputs["old_log_probs"]
                     advantages = model_inputs["advantages"]
-                    
-                    model_inputs_rollout = {**micro_batch_rollout.batch, **micro_batch_rollout.non_tensor_batch}
-                    responses_rollout = model_inputs_rollout["responses"]
-                    response_length_rollout = responses_rollout.size(1)
-                    attention_mask_rollout = model_inputs_rollout["attention_mask"]
-                    response_mask_rollout = attention_mask_rollout[:, -response_length_rollout:]
-                    old_log_probs_rollout = model_inputs_rollout["old_log_probs"]
-                    advantages_rollout = model_inputs_rollout["advantages"]
 
                     # all return: (bsz, response_length)
                     log_probs = self._forward_micro_batch(model_inputs, temperature=temperature)
-                    log_probs_rollout = self._forward_micro_batch(model_inputs_rollout, temperature=temperature)
 
                     pg_loss, pg_metrics = compute_policy_loss(
                         old_log_probs=old_log_probs,
@@ -557,42 +559,6 @@ class DataParallelPPOActor(BasePPOActor):
                         clip_ratio_dual=self.config.clip_ratio_dual,
                         loss_avg_mode=self.config.loss_avg_mode,
                     )
-                    pg_loss_rollout, pg_metrics_rollout = compute_policy_loss(
-                        old_log_probs=old_log_probs_rollout,
-                        log_probs=log_probs_rollout,
-                        advantages=advantages_rollout,
-                        response_mask=response_mask_rollout,
-                        clip_ratio_low=self.config.clip_ratio_low,
-                        clip_ratio_high=self.config.clip_ratio_high,
-                        clip_ratio_dual=self.config.clip_ratio_dual,
-                        loss_avg_mode=self.config.loss_avg_mode,
-                    )
-                    if self.config.use_kl_loss and "ref_log_probs" in model_inputs:
-                        ref_log_probs = model_inputs["ref_log_probs"]
-                        ref_log_probs_rollout = model_inputs_rollout["ref_log_probs"]
-                        # compute kl loss
-                        kld = compute_kl(
-                            log_probs=log_probs,
-                            ref_log_probs=ref_log_probs,
-                            kl_penalty=self.config.kl_penalty,
-                        )
-                        kld_rollout = compute_kl(
-                            log_probs=log_probs_rollout,
-                            ref_log_probs=ref_log_probs_rollout,
-                            kl_penalty=self.config.kl_penalty,
-                        )
-                        kl_loss = average_loss(kld, response_mask, mode=self.config.loss_avg_mode)
-                        kl_loss_rollout = average_loss(kld_rollout, response_mask_rollout, mode=self.config.loss_avg_mode)
-                        pg_loss = pg_loss + kl_loss * self.config.kl_coef
-                        pg_loss_rollout = pg_loss_rollout + kl_loss_rollout * self.config.kl_coef
-                        metrics["actor/kl_loss"] = kl_loss.detach().item()
-                        metrics["actor/kl_coef"] = self.config.kl_coef
-                        metrics["actor/kl_loss_rollout"] = kl_loss_rollout.detach().item()
-                        metrics["actor/kl_coef_rollout"] = self.config.kl_coef
-
-                    loss = (1 - rollout_weight) * pg_loss / gradient_accumulation + rollout_weight * pg_loss_rollout / gradient_accumulation
-                    
-                    loss.backward()
 
                     batch_metrics = {
                         "actor/pg_loss": pg_loss.detach().item(),
@@ -600,12 +566,69 @@ class DataParallelPPOActor(BasePPOActor):
                         "actor/pg_clipfrac_lower": pg_metrics["pg_clipfrac_lower"],
                         "actor/entropy_loss": pg_metrics["entropy_loss"],
                         "actor/ppo_kl": pg_metrics["ppo_kl"],
-                        "actor/pg_loss_rollout": pg_loss_rollout.detach().item(),
-                        "actor/pg_clipfrac_higher_rollout": pg_metrics_rollout["pg_clipfrac_higher"],
-                        "actor/pg_clipfrac_lower_rollout": pg_metrics_rollout["pg_clipfrac_lower"],
-                        "actor/entropy_loss_rollout": pg_metrics_rollout["entropy_loss"],
-                        "actor/ppo_kl_rollout": pg_metrics_rollout["ppo_kl"],
                     }
+
+                    if micro_batch_rollout is not None:
+                        model_inputs_rollout = {**micro_batch_rollout.batch, **micro_batch_rollout.non_tensor_batch}
+                        responses_rollout = model_inputs_rollout["responses"]
+                        response_length_rollout = responses_rollout.size(1)
+                        attention_mask_rollout = model_inputs_rollout["attention_mask"]
+                        response_mask_rollout = attention_mask_rollout[:, -response_length_rollout:]
+                        old_log_probs_rollout = model_inputs_rollout["old_log_probs"]
+                        advantages_rollout = model_inputs_rollout["advantages"]
+
+                        log_probs_rollout = self._forward_micro_batch(model_inputs_rollout, temperature=temperature)
+
+                        pg_loss_rollout, pg_metrics_rollout = compute_policy_loss(
+                            old_log_probs=old_log_probs_rollout,
+                            log_probs=log_probs_rollout,
+                            advantages=advantages_rollout,
+                            response_mask=response_mask_rollout,
+                            clip_ratio_low=self.config.clip_ratio_low,
+                            clip_ratio_high=self.config.clip_ratio_high,
+                            clip_ratio_dual=self.config.clip_ratio_dual,
+                            loss_avg_mode=self.config.loss_avg_mode,
+                        )
+
+                        batch_metrics.update({
+                            "actor/pg_loss_rollout": pg_loss_rollout.detach().item(),
+                            "actor/pg_clipfrac_higher_rollout": pg_metrics_rollout["pg_clipfrac_higher"],
+                            "actor/pg_clipfrac_lower_rollout": pg_metrics_rollout["pg_clipfrac_lower"],
+                            "actor/entropy_loss_rollout": pg_metrics_rollout["entropy_loss"],
+                            "actor/ppo_kl_rollout": pg_metrics_rollout["ppo_kl"],
+                        })
+                    else:
+                        pg_loss_rollout = torch.tensor(0.0, device=pg_loss.device, dtype=pg_loss.dtype)
+
+                    if self.config.use_kl_loss and "ref_log_probs" in model_inputs:
+                        ref_log_probs = model_inputs["ref_log_probs"]
+                        # compute kl loss
+                        kld = compute_kl(
+                            log_probs=log_probs,
+                            ref_log_probs=ref_log_probs,
+                            kl_penalty=self.config.kl_penalty,
+                        )
+                        kl_loss = average_loss(kld, response_mask, mode=self.config.loss_avg_mode)
+                        pg_loss = pg_loss + kl_loss * self.config.kl_coef
+                        batch_metrics["actor/kl_loss"] = kl_loss.detach().item()
+                        batch_metrics["actor/kl_coef"] = self.config.kl_coef
+
+                        if micro_batch_rollout is not None and "ref_log_probs" in model_inputs_rollout:
+                            ref_log_probs_rollout = model_inputs_rollout["ref_log_probs"]
+                            kld_rollout = compute_kl(
+                                log_probs=log_probs_rollout,
+                                ref_log_probs=ref_log_probs_rollout,
+                                kl_penalty=self.config.kl_penalty,
+                            )
+                            kl_loss_rollout = average_loss(kld_rollout, response_mask_rollout, mode=self.config.loss_avg_mode)
+                            pg_loss_rollout = pg_loss_rollout + kl_loss_rollout * self.config.kl_coef
+                            batch_metrics["actor/kl_loss_rollout"] = kl_loss_rollout.detach().item()
+                            batch_metrics["actor/kl_coef_rollout"] = self.config.kl_coef
+
+                    loss = (1 - rollout_weight) * pg_loss / gradient_accumulation + rollout_weight * pg_loss_rollout / gradient_accumulation
+                                        
+                    loss.backward()
+
                     append_to_dict(metrics, batch_metrics)
 
                 grad_norm = self._optimizer_step()
