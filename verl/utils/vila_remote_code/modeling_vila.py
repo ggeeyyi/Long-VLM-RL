@@ -468,7 +468,7 @@ class VILAPretrainedModel(PreTrainedModel):
         # XGrammar tokenizer and grammar compiler
         # lazy init only when specified json output during inference
         self.grammar_compiler = None
-        self.llm.resize_token_embeddings(len(self.tokenizer))
+        # self.llm.resize_token_embeddings(len(self.tokenizer))
         return self.llm, self.tokenizer
 
     def post_config(self):

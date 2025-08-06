@@ -253,7 +253,7 @@ class SiglipVisionTower(VisionTower):
         # TODO(ligengl): why pass config here leading to errors?
         self.vision_tower = SiglipVisionModel.from_pretrained(
             model_name_or_path,
-            attn_implementation="flash_attention_2_ori",
+            attn_implementation="flash_attention_2",
             torch_dtype=eval(config.model_dtype),
         )
         self.image_processor = SiglipImageProcessor.from_pretrained(model_name_or_path)
@@ -265,7 +265,7 @@ class SiglipVisionTowerS2(VisionTowerS2):
         super().__init__(model_name_or_path, config)
         self.vision_tower = SiglipVisionModel.from_pretrained(
             model_name_or_path,
-            attn_implementation="flash_attention_2_ori",
+            attn_implementation="flash_attention_2",
             torch_dtype=eval(config.model_dtype),
         )
         self.image_processor = SiglipImageProcessor.from_pretrained(model_name_or_path)
@@ -279,7 +279,7 @@ class SiglipVisionTowerDynamicS2(VisionTowerDynamicS2):
         super().__init__(model_name_or_path, config)
         self.vision_tower = SiglipVisionModel.from_pretrained(
             model_name_or_path,
-            attn_implementation="flash_attention_2_ori",
+            attn_implementation="flash_attention_2",
             torch_dtype=eval(config.model_dtype),
         )
         self.image_processor = SiglipImageProcessor.from_pretrained(model_name_or_path)

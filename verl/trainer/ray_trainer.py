@@ -837,7 +837,7 @@ class RayPPOTrainer:
         if self.config.trainer.save_freq <= 0 or self.global_step % self.config.trainer.save_freq != 0:
             self._save_checkpoint()
 
-    def generate_rollout(self, train_dataset, val_dataset):
+    def generate_rollout(self, train_dataset, val_dataset, dataset_path):
         """
         Generate and save rollouts from the current model for later distillation training.
         This version supports multiple processing approaches for dataset items.
@@ -851,7 +851,9 @@ class RayPPOTrainer:
 
         self.actor_rollout_ref_wg.prepare_rollout_engine()
         self.data_iterator = iter(self.train_dataloader)
-        dataset_path = 'rollout_cache'
+        print(f"Processing training dataset... {dataset_path}")
+        if not os.path.exists(dataset_path):
+            os.makedirs(dataset_path)
         if not os.path.exists(os.path.join(dataset_path, 'train.pth')):
             train_gen_batch_output = self._make_batch_data_rollout_cache(train_dataset)
             train_gen_batch = train_gen_batch_output.batch
@@ -876,8 +878,7 @@ class RayPPOTrainer:
             'train': aligned_train_datset,
             'val': aligned_val_datset
         })
-        save_path = "aligned_dataset"
-        aligned_dataset_dict.save_to_disk(save_path)
+        aligned_dataset_dict.save_to_disk(dataset_path)
         aligned_dataset_dict.push_to_hub("GY2233/lmms-ScienceQA-rollout-cache")
         
         print("Rollout generation completed!")

@@ -100,7 +100,7 @@ class Runner:
         )
         trainer.init_workers()
         if config.trainer.generate_rollout:
-           gen_batch_output = trainer.generate_rollout(train_dataset, val_dataset)
+           gen_batch_output = trainer.generate_rollout(train_dataset, val_dataset, config.trainer.rollout_cache_path)
            print(gen_batch_output)
            # align 
            return

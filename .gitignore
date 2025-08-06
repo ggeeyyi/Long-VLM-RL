@@ -135,4 +135,7 @@ trashcan
 *.pth
 *.sh
 *.yaml
-*.pkl
+
+aligned_dataset
+rollout_cache
+rollout_cache_qwen2_5_vl_7b_scienceqa_full

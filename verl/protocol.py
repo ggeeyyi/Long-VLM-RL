@@ -592,8 +592,28 @@ class DataProto:
         new_batch = torch.cat(batch_lst, dim=0) if batch_lst[0] is not None else None
         non_tensor_batch = batch_collate([d.non_tensor_batch for d in data])
         for key, value in non_tensor_batch.items():
-            non_tensor_batch[key] = np.concatenate(value, axis=0)
-
+            try:
+                non_tensor_batch[key] = np.concatenate(value, axis=0)
+            except Exception as e:
+                if key == 'multi_modal_embeds':
+                    flattened_list = []
+                    for batch in value:
+                        if isinstance(batch, list):
+                            flattened_list.extend(batch)
+                        else:
+                            flattened_list.append(batch)
+                    non_tensor_batch[key] = flattened_list
+                elif key == 'multi_modal_labels':
+                    flattened_list = []
+                    for batch in value:
+                        if isinstance(batch, list):
+                            flattened_list.extend(batch)
+                        else:
+                            flattened_list.append(batch)
+                    non_tensor_batch[key] = flattened_list
+                else:
+                    raise e
+                
         return DataProto(batch=new_batch, non_tensor_batch=non_tensor_batch, meta_info=data[0].meta_info)
 
     def reorder(self, indices: torch.Tensor) -> None:

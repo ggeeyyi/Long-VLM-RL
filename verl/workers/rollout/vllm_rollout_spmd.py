@@ -246,12 +246,21 @@ class vLLMRollout(BaseRollout):
                     batch_pad_lengths.append(self.prompt_length - len(raw_prompt_ids))
                     _raw_prompt_ids = torch.Tensor(list(raw_prompt_ids)).long().unsqueeze(0).to(self.model_vision_encoder.device)
                     vision_key = list(multi_modal_data.keys())[0]
-                    _dtype = multi_modal_data[vision_key][0].dtype
-                    multi_modal_data[vision_key] = [_data.to(self.model_vision_encoder.dtype) for _data in multi_modal_data[vision_key]]
-                    num_video_frames = multi_modal_data[vision_key][0].size(0)
-                    labels = torch.full(_raw_prompt_ids.shape, 1, dtype=_raw_prompt_ids.dtype, device=_raw_prompt_ids.device)
-                    media_config = {vision_key: {"frames_split": multi_modal_data[vision_key][0].shape[0] // self.group_frames if "video" in vision_key and self.group_frames>0 else 0}}
-                    inputs_embeds, labels, _ = self.model_vision_encoder._embed(_raw_prompt_ids, multi_modal_data, media_config, labels ,None)
+                    if len(multi_modal_data[vision_key]) > 0:
+                        _dtype = multi_modal_data[vision_key][0].dtype
+                        multi_modal_data[vision_key] = [_data.to(self.model_vision_encoder.dtype) for _data in multi_modal_data[vision_key]]
+                        num_video_frames = multi_modal_data[vision_key][0].size(0)
+                        labels = torch.full(_raw_prompt_ids.shape, 1, dtype=_raw_prompt_ids.dtype, device=_raw_prompt_ids.device)
+                        media_config = {vision_key: {"frames_split": multi_modal_data[vision_key][0].shape[0] // self.group_frames if "video" in vision_key and self.group_frames>0 else 0}}
+                        inputs_embeds, labels, _ = self.model_vision_encoder._embed(_raw_prompt_ids, multi_modal_data, media_config, labels ,None)
+                    else:
+                        num_video_frames = 0
+                        _dtype = torch.float16                               
+                        multi_modal_data = None
+                        labels = torch.full(_raw_prompt_ids.shape, 1, dtype=_dtype, device=_raw_prompt_ids.device)
+                        media_config = {vision_key: {"frames_split": 0}}
+                        inputs_embeds, labels, _ = self.model_vision_encoder._embed(_raw_prompt_ids, multi_modal_data, media_config, labels ,None)
+
                     if self.max_frames_vllm < num_video_frames:
                         resized_embeds = _sample_video_embeds(inputs_embeds, labels==IGNORE_INDEX, num_video_frames, self.max_frames_vllm)
                     else:

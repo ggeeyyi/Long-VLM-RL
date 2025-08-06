@@ -97,7 +97,7 @@ def _get_messages_vila(example: Dict[str, Any],
                        image_key: str = "images",
                        image_dir: Optional[str] = None,
                        video_key: str = "videos",
-                       video_dir: str = None,) -> Dict[str, Any]:
+                       video_dir: str = None, mask_image: bool = False) -> Dict[str, Any]:
     if video_key in example:
         vision_key = "video"
         vision_value = example[video_key]
@@ -118,12 +118,22 @@ def _get_messages_vila(example: Dict[str, Any],
     else:
         raise ValueError("Unsupported VILA for text only.")
 
-    messages = [{"role": "user", "content": "<%s>" % vision_key + example[prompt_key]}]
-    prompt = question_template.format(question=messages[-1]['content'].replace("<%s>" % vision_key, ""))
-    messages[-1]['content'] = [
-        {"type": vision_key, message_key: vision_value},
-        {"type": "text", "text": prompt},
-    ]
+    if mask_image:
+        # Remove vision tag from prompt when masking
+        messages = [{"role": "user", "content": "<%s>" % vision_key + example[prompt_key]}]
+        prompt = question_template.format(question=messages[-1]['content'].replace("<%s>" % vision_key, ""))
+        prompt = prompt.replace("<image>", "")
+        prompt = prompt.replace("<video>", "")
+        messages[-1]['content'] = [
+            {"type": "text", "text": prompt},
+        ]
+    else:
+        messages = [{"role": "user", "content": "<%s>" % vision_key + example[prompt_key]}]
+        prompt = question_template.format(question=messages[-1]['content'].replace("<%s>" % vision_key, ""))
+        messages[-1]['content'] = [
+            {"type": vision_key, message_key: vision_value},
+            {"type": "text", "text": prompt},
+        ]
     return messages, prompt
 
 def _filter_overlong_prompts_vila(example: Dict[str, Any],
@@ -320,7 +330,8 @@ class RLHFDataset(Dataset):
         messages = self._build_messages(example)
         max_prompt_length = self.max_prompt_length
         if self.vila_model:
-            messages, prompt = _get_messages_vila(example, self.prompt_key, self.image_key, self.image_dir, self.video_key, self.video_dir)
+            mask_image = example.get("mask_image", False)
+            messages, prompt = _get_messages_vila(example, self.prompt_key, self.image_key, self.image_dir, self.video_key, self.video_dir, mask_image)
             vision_key = messages[-1]['content'][0]['type']
             videos_cache = []
             num_video_frames = self.processor.config.num_video_frames
